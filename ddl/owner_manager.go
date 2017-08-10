@@ -49,11 +49,21 @@ type OwnerManager interface {
 }
 
 const (
-	// DDLOwnerKey is the ddl owner path that is saved to etcd, and it's exported for testing.
-	DDLOwnerKey               = "/tidb/ddl/fg/owner"
 	newSessionDefaultRetryCnt = 3
 	newSessionRetryUnlimited  = math.MaxInt64
 )
+
+var (
+	// DDLOwnerKey is the ddl owner path that is saved to etcd, and it's exported for testing.
+	DDLOwnerKey = "/tidb/ddl/fg/owner"
+)
+
+func UpdateDDLOwnerKeyWithNS(ns []byte) {
+	if ns == nil || len(ns) == 0 {
+		return
+	}
+	DDLOwnerKey = fmt.Sprintf("/NS_%s%s", string(ns), DDLOwnerKey)
+}
 
 // ownerManager represents the structure which is used for electing owner.
 type ownerManager struct {

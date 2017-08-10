@@ -95,10 +95,13 @@ func NewSnapshotMeta(snapshot kv.Snapshot) *Meta {
 }
 
 // GenGlobalID generates next id globally.
-func (m *Meta) GenGlobalID() (int64, error) {
+func (m *Meta) GenGlobalID(withoutNS bool) (int64, error) {
 	globalIDMutex.Lock()
 	defer globalIDMutex.Unlock()
-
+	// For now we don't want to make global ID in namespace
+	if withoutNS {
+		m.txn.RevertToOriginPrefix()
+	}
 	return m.txn.Inc(mNextGlobalIDKey, 1)
 }
 

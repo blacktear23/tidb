@@ -37,6 +37,7 @@ import (
 	"github.com/pingcap/tidb/sessionctx/binloginfo"
 	"github.com/pingcap/tidb/store/localstore/boltdb"
 	"github.com/pingcap/tidb/store/tikv"
+	"github.com/pingcap/tidb/structure"
 	"github.com/pingcap/tidb/util/printer"
 	"github.com/pingcap/tipb/go-binlog"
 	"github.com/prometheus/client_golang/prometheus"
@@ -70,6 +71,7 @@ var (
 	slowThreshold       = flag.Int("slow-threshold", 300, "Queries with execution time greater than this value will be logged. (Milliseconds)")
 	queryLogMaxlen      = flag.Int("query-log-max-len", 2048, "Maximum query length recorded in log")
 	tcpKeepAlive        = flag.Bool("tcp-keep-alive", false, "set keep alive option for tcp connection.")
+	namespace           = flag.String("namespace", "", "tidb storage namespace.")
 	timeJumpBackCounter = prometheus.NewCounter(
 		prometheus.CounterOpts{
 			Namespace: "tidb",
@@ -114,7 +116,6 @@ func main() {
 	cfg.SlowThreshold = *slowThreshold
 	cfg.QueryLogMaxlen = *queryLogMaxlen
 	cfg.TCPKeepAlive = *tcpKeepAlive
-
 	// set log options
 	if len(*logFile) > 0 {
 		err := log.SetOutputByName(*logFile)
@@ -133,6 +134,7 @@ func main() {
 	printer.PrintTiDBInfo()
 	log.SetLevelByString(cfg.LogLevel)
 
+	updateNamespace()
 	store := createStore()
 
 	if *enablePS {
@@ -259,4 +261,16 @@ func parseLease(lease string) time.Duration {
 
 func hasRootPrivilege() bool {
 	return os.Geteuid() == 0
+}
+
+func updateNamespace() {
+	if len(*namespace) > 0 {
+		ns := []byte(*namespace)
+		structure.Namespace = ns
+		ddl.UpdateDDLOwnerKeyWithNS(ns)
+		ddl.UpdateDDLSchemaVersionsWithNS(ns)
+		log.Info("TiDB Using Namespace:", *namespace)
+	} else {
+		structure.Namespace = nil
+	}
 }

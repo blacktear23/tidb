@@ -28,12 +28,6 @@ import (
 )
 
 const (
-	// DDLAllSchemaVersions is the path on etcd that is used to store all servers current schema versions.
-	// It's exported for testing.
-	DDLAllSchemaVersions = "/tidb/ddl/all_schema_versions"
-	// DDLGlobalSchemaVersion is the path on etcd that is used to store the latest schema versions.
-	// It's exported for testing.
-	DDLGlobalSchemaVersion = "/tidb/ddl/global_schema_version"
 	// InitialVersion is the initial schema version for every server.
 	// It's exported for testing.
 	InitialVersion       = "0"
@@ -46,6 +40,12 @@ const (
 )
 
 var (
+	// DDLAllSchemaVersions is the path on etcd that is used to store all servers current schema versions.
+	// It's exported for testing.
+	DDLAllSchemaVersions = "/tidb/ddl/all_schema_versions"
+	// DDLGlobalSchemaVersion is the path on etcd that is used to store the latest schema versions.
+	// It's exported for testing.
+	DDLGlobalSchemaVersion = "/tidb/ddl/global_schema_version"
 	// CheckVersFirstWaitTime is a waitting time before the owner checks all the servers of the schema version,
 	// and it's an exported variable for testing.
 	CheckVersFirstWaitTime = 50 * time.Millisecond
@@ -53,6 +53,14 @@ var (
 	// and it's an exported variable for testing.
 	SyncerSessionTTL = 10 * 60
 )
+
+func UpdateDDLSchemaVersionsWithNS(ns []byte) {
+	if ns == nil || len(ns) == 0 {
+		return
+	}
+	DDLAllSchemaVersions = fmt.Sprintf("/NS_%s%s", string(ns), DDLAllSchemaVersions)
+	DDLGlobalSchemaVersion = fmt.Sprintf("/NS_%s%s", string(ns), DDLGlobalSchemaVersion)
+}
 
 // SchemaSyncer is used to synchronize schema version between the DDL worker leader and followers through etcd.
 type SchemaSyncer interface {

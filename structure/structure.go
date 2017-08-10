@@ -14,6 +14,8 @@
 package structure
 
 import (
+	"bytes"
+
 	"github.com/pingcap/tidb/kv"
 	"github.com/pingcap/tidb/terror"
 )
@@ -33,21 +35,36 @@ var (
 	errInvalidListIndex     = terror.ClassStructure.New(codeInvalidListMetaData, "invalid list index")
 	errInvalidListMetaData  = terror.ClassStructure.New(codeInvalidListMetaData, "invalid list meta data")
 	errWriteOnSnapshot      = terror.ClassStructure.New(codeWriteOnSnapshot, "write on snapshot")
+
+	Namespace []byte = nil
 )
+
+func prefixWithNamespace(prefix []byte) []byte {
+	if Namespace == nil {
+		return prefix
+	}
+	return bytes.Join([][]byte{Namespace, prefix}, []byte("_"))
+}
 
 // NewStructure creates a TxStructure with Retriever, RetrieverMutator and key prefix.
 func NewStructure(reader kv.Retriever, readWriter kv.RetrieverMutator, prefix []byte) *TxStructure {
 	return &TxStructure{
-		reader:     reader,
-		readWriter: readWriter,
-		prefix:     prefix,
+		reader:       reader,
+		readWriter:   readWriter,
+		prefix:       prefixWithNamespace(prefix),
+		originPrefix: prefix,
 	}
 }
 
 // TxStructure supports some simple data structures like string, hash, list, etc... and
 // you can use these in a transaction.
 type TxStructure struct {
-	reader     kv.Retriever
-	readWriter kv.RetrieverMutator
-	prefix     []byte
+	reader       kv.Retriever
+	readWriter   kv.RetrieverMutator
+	prefix       []byte
+	originPrefix []byte
+}
+
+func (s *TxStructure) RevertToOriginPrefix() {
+	s.prefix = s.originPrefix
 }

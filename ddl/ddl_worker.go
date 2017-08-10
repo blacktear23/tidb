@@ -82,7 +82,7 @@ func (d *ddl) addDDLJob(ctx context.Context, job *model.Job) error {
 	return kv.RunInNewTxn(d.store, true, func(txn kv.Transaction) error {
 		t := meta.NewMeta(txn)
 		var err error
-		job.ID, err = t.GenGlobalID()
+		job.ID, err = t.GenGlobalID(false)
 		if err != nil {
 			return errors.Trace(err)
 		}

@@ -49,7 +49,7 @@ func (s *testSuite) TestMeta(c *C) {
 
 	t := meta.NewMeta(txn)
 
-	n, err := t.GenGlobalID()
+	n, err := t.GenGlobalID(false)
 	c.Assert(err, IsNil)
 	c.Assert(n, Equals, int64(1))
 
@@ -230,7 +230,7 @@ func (s *testSuite) TestSnapshot(c *C) {
 
 	txn, _ := store.Begin()
 	m := meta.NewMeta(txn)
-	m.GenGlobalID()
+	m.GenGlobalID(false)
 	n, _ := m.GetGlobalID()
 	c.Assert(n, Equals, int64(1))
 	txn.Commit()
@@ -239,7 +239,7 @@ func (s *testSuite) TestSnapshot(c *C) {
 	time.Sleep(time.Millisecond)
 	txn, _ = store.Begin()
 	m = meta.NewMeta(txn)
-	m.GenGlobalID()
+	m.GenGlobalID(false)
 	n, _ = m.GetGlobalID()
 	c.Assert(n, Equals, int64(2))
 	txn.Commit()
@@ -248,7 +248,7 @@ func (s *testSuite) TestSnapshot(c *C) {
 	snapMeta := meta.NewSnapshotMeta(snapshot)
 	n, _ = snapMeta.GetGlobalID()
 	c.Assert(n, Equals, int64(1))
-	_, err = snapMeta.GenGlobalID()
+	_, err = snapMeta.GenGlobalID(false)
 	c.Assert(err, NotNil)
 }
 

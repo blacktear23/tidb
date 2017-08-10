@@ -389,7 +389,7 @@ func (d *ddl) genGlobalID() (int64, error) {
 	var globalID int64
 	err := kv.RunInNewTxn(d.store, true, func(txn kv.Transaction) error {
 		var err error
-		globalID, err = meta.NewMeta(txn).GenGlobalID()
+		globalID, err = meta.NewMeta(txn).GenGlobalID(true)
 		return errors.Trace(err)
 	})
 
