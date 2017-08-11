@@ -51,15 +51,38 @@ func (m *Meta) DelNamespace(ns []byte) error {
 
 func (m *Meta) ClearNamespace() error {
 	var err error
+	// Clean mDDLJobListKey
 	err = m.txn.LClear(mDDLJobListKey)
 	if err != nil {
 		return errors.Trace(err)
 	}
+	// Clean mDDLJobHistoryKey
 	err = m.txn.HClear(mDDLJobHistoryKey)
 	if err != nil {
 		return errors.Trace(err)
 	}
+	// Clean mDDLJobReorgKey
 	err = m.txn.HClear(mDDLJobReorgKey)
+	if err != nil {
+		return errors.Trace(err)
+	}
+	// Clean mBgJobListKey
+	err = m.txn.LClear(mBgJobListKey)
+	if err != nil {
+		return errors.Trace(err)
+	}
+	// Clean mBgJobHistoryKey
+	err = m.txn.HClear(mBgJobHistoryKey)
+	if err != nil {
+		return errors.Trace(err)
+	}
+	// Clean mDBS
+	err = m.txn.HClear(mDBs)
+	if err != nil {
+		return errors.Trace(err)
+	}
+	// Clean SchemaVersionKey
+	err = m.txn.Clear(mSchemaVersionKey)
 	if err != nil {
 		return errors.Trace(err)
 	}

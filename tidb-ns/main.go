@@ -19,6 +19,7 @@ import (
 	"runtime"
 	"time"
 
+	"github.com/coreos/etcd/clientv3"
 	"github.com/juju/errors"
 	"github.com/ngaut/log"
 	"github.com/pingcap/tidb"
@@ -43,6 +44,7 @@ func help() {
 	fmt.Println("commands:")
 	fmt.Println("    list       list all namespaces")
 	fmt.Println("    show [ns]  show namespace databases  and tables")
+	fmt.Println("    jobs [ns]  show namespace jobs")
 	fmt.Println("    rm   [ns]  remove namespace")
 	fmt.Println("")
 	flag.PrintDefaults()
@@ -78,6 +80,12 @@ func main() {
 			return
 		}
 		runCmdRemove(store, []byte(args[1]))
+	case "jobs":
+		if len(args) != 2 {
+			help()
+			return
+		}
+		runCmdJobs(store, []byte(args[1]))
 	default:
 		help()
 	}
@@ -177,6 +185,7 @@ func runCmdShow(store kv.Storage, ns []byte) {
 
 func runCmdRemove(store kv.Storage, ns []byte) {
 	updateNamespace(store, ns)
+	cleanEtcd(store, true)
 	if !hasNamespace(store, ns) {
 		fmt.Println("Do not has Namespace:", string(ns))
 		return
@@ -192,7 +201,31 @@ func runCmdRemove(store kv.Storage, ns []byte) {
 		}
 		return m.DelNamespace(ns)
 	})
+	cleanEtcd(store, false)
 }
+
+func runCmdJobs(store kv.Storage, ns []byte) {
+	updateNamespace(store, ns)
+	if !hasNamespace(store, ns) {
+		fmt.Println("Do not has Namespace:", string(ns))
+		return
+	}
+	runWithMeta(store, func(m *meta.Meta) error {
+		ddlJobs, err := m.DDLJobQueueLen()
+		if err != nil {
+			return err
+		}
+		bgJobs, err := m.BgJobQueueLen()
+		if err != nil {
+			return err
+		}
+		fmt.Println("DDL Jobs:", ddlJobs)
+		fmt.Println("Background Jobs:", bgJobs)
+		return nil
+	})
+}
+
+// Below is clean Namespace codes
 
 func cleanNamespace(store kv.Storage) {
 	sess, err := tidb.CreateSession(store)
@@ -228,18 +261,30 @@ func listTables(store kv.Storage, db *model.DBInfo) []*model.TableInfo {
 }
 
 func cleanSystemDB(s tidb.Session, store kv.Storage, db *model.DBInfo) {
-	var gcrangetbl *model.TableInfo
+	var gcrangeTbl, tidbTbl *model.TableInfo
 	for _, tbl := range listTables(store, db) {
 		if tbl.Name.String() == "gc_delete_range" {
-			gcrangetbl = tbl
+			gcrangeTbl = tbl
+			continue
+		}
+		if tbl.Name.String() == "tidb" {
+			tidbTbl = tbl
 			continue
 		}
 		sql := fmt.Sprintf("DROP TABLE `%s`.`%s`", mysql.SystemDB, tbl.Name.String())
 		mustExec(s, sql)
 	}
-	waitRangeDeleteFinish(s, gcrangetbl)
+	waitRangeDeleteFinish(s, gcrangeTbl)
 	runWithMeta(store, func(m *meta.Meta) error {
-		return m.DropTable(db.ID, gcrangetbl.ID, true)
+		err := m.DropTable(db.ID, gcrangeTbl.ID, true)
+		if err != nil {
+			return err
+		}
+		err = m.DropTable(db.ID, tidbTbl.ID, true)
+		if err != nil {
+			return err
+		}
+		return nil
 	})
 }
 
@@ -260,7 +305,30 @@ func waitRangeDeleteFinish(s tidb.Session, tbl *model.TableInfo) {
 			break
 		}
 		fmt.Printf("Waiting %d Delete Range Job Finished\n", n)
-		time.Sleep(1)
+		time.Sleep(30 * time.Second)
+	}
+}
+
+func waitJobFinish(store kv.Storage) {
+	for {
+		var bgJobs, ddlJobs int64
+		runWithMeta(store, func(m *meta.Meta) error {
+			var err error
+			ddlJobs, err = m.DDLJobQueueLen()
+			if err != nil {
+				return err
+			}
+			bgJobs, err = m.BgJobQueueLen()
+			if err != nil {
+				return err
+			}
+			return nil
+		})
+		if bgJobs == 0 && ddlJobs == 0 {
+			break
+		}
+		fmt.Printf("Waiting Jobs (DDLJobs: %d, BGJobs: %d) Finished", ddlJobs, bgJobs)
+		time.Sleep(3 * time.Second)
 	}
 }
 
@@ -268,5 +336,34 @@ func mustExec(s tidb.Session, sql string) {
 	_, err := s.Execute(sql)
 	if err != nil {
 		log.Fatal(err)
+	}
+}
+
+type etcdAddrs interface {
+	EtcdAddrs() []string
+}
+
+func cleanEtcd(store kv.Storage, ownerOnly bool) {
+	if eaddrs, ok := store.(etcdAddrs); ok {
+		if addrs := eaddrs.EtcdAddrs(); addrs != nil {
+			cli, err := clientv3.New(clientv3.Config{
+				Endpoints:   addrs,
+				DialTimeout: 5 * time.Second,
+			})
+			if err != nil {
+				return
+			}
+			defer cli.Close()
+			doCleanEtcd(cli, ownerOnly)
+		}
+	}
+}
+
+func doCleanEtcd(cli *clientv3.Client, ownerOnly bool) {
+	kvc := clientv3.NewKV(cli)
+	kvc.Delete(cli.Ctx(), ddl.DDLOwnerKey)
+	if !ownerOnly {
+		kvc.Delete(cli.Ctx(), ddl.DDLAllSchemaVersions)
+		kvc.Delete(cli.Ctx(), ddl.DDLGlobalSchemaVersion)
 	}
 }
