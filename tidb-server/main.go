@@ -30,6 +30,7 @@ import (
 	"github.com/pingcap/tidb/config"
 	"github.com/pingcap/tidb/ddl"
 	"github.com/pingcap/tidb/kv"
+	"github.com/pingcap/tidb/meta"
 	"github.com/pingcap/tidb/perfschema"
 	"github.com/pingcap/tidb/plan"
 	"github.com/pingcap/tidb/privilege/privileges"
@@ -134,8 +135,8 @@ func main() {
 	printer.PrintTiDBInfo()
 	log.SetLevelByString(cfg.LogLevel)
 
-	updateNamespace()
 	store := createStore()
+	updateNamespace(store)
 
 	if *enablePS {
 		perfschema.EnablePerfSchema()
@@ -263,13 +264,26 @@ func hasRootPrivilege() bool {
 	return os.Geteuid() == 0
 }
 
-func updateNamespace() {
+func updateNamespaceToMeta(store kv.Storage, ns []byte) {
+	err := kv.RunInNewTxn(store, false, func(txn kv.Transaction) error {
+		var err error
+		t := meta.NewMeta(txn)
+		err = t.CreateNamespace(ns)
+		return errors.Trace(err)
+	})
+	if err != nil {
+		log.Fatalf("Update Namespace To Meta Error: %v", err)
+	}
+}
+
+func updateNamespace(store kv.Storage) {
 	if len(*namespace) > 0 {
 		ns := []byte(*namespace)
 		structure.Namespace = ns
 		ddl.UpdateDDLOwnerKeyWithNS(ns)
 		ddl.UpdateDDLSchemaVersionsWithNS(ns)
 		log.Info("TiDB Using Namespace:", *namespace)
+		updateNamespaceToMeta(store, ns)
 	} else {
 		structure.Namespace = nil
 	}

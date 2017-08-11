@@ -54,10 +54,10 @@ var (
 	mNextGlobalIDKey  = []byte("NextGlobalID")
 	mSchemaVersionKey = []byte("SchemaVersionKey")
 	mDBs              = []byte("DBs")
+	mBootstrapKey     = []byte("BootstrapKey")
 	mDBPrefix         = "DB"
 	mTablePrefix      = "Table"
 	mTableIDPrefix    = "TID"
-	mBootstrapKey     = []byte("BootstrapKey")
 	mTableStatsPrefix = "TStats"
 	mSchemaDiffPrefix = "Diff"
 )

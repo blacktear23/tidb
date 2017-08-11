@@ -31,7 +31,7 @@ TARGET = ""
 
 .PHONY: all build update parser clean todo test gotest interpreter server dev benchkv benchraw check parserlib checklist
 
-default: server buildsucc
+default: server tidb_ns buildsucc
 
 buildsucc:
 	@echo Build TiDB Server successfully!
@@ -142,6 +142,9 @@ ifeq ($(TARGET), "")
 else
 	$(GOBUILD) $(RACE_FLAG) -ldflags '$(LDFLAGS)' -o '$(TARGET)' tidb-server/main.go
 endif
+
+tidb_ns:
+	$(GOBUILD) $(RACE_FLAG) -ldflags '$(LDFLAGS)' -o bin/tidb-ns tidb-ns/main.go
 
 benchkv:
 	$(GOBUILD) -ldflags '$(LDFLAGS)' -o bin/benchkv cmd/benchkv/main.go
