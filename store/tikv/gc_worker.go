@@ -419,6 +419,7 @@ func resolveLocks(ctx goctx.Context, store *tikvStore, safePoint uint64, identif
 		if err != nil {
 			return errors.Trace(err)
 		}
+		log.Info(loc.Region, loc)
 		resp, err := store.SendReq(bo, req, loc.Region, readTimeoutMedium)
 		if err != nil {
 			return errors.Trace(err)
