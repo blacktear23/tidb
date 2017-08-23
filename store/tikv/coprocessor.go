@@ -15,6 +15,7 @@ package tikv
 
 import (
 	"bytes"
+	"encoding/binary"
 	"fmt"
 	"sync"
 	"time"
@@ -26,6 +27,10 @@ import (
 	"github.com/pingcap/tidb/store/tikv/tikvrpc"
 	"github.com/pingcap/tipb/go-tipb"
 	goctx "golang.org/x/net/context"
+)
+
+var (
+	CoprocessorParallelLevel = 2
 )
 
 // CopClient is coprocessor client.
@@ -220,6 +225,126 @@ func (r *copRanges) toPBRanges() []*coprocessor.KeyRange {
 	return ranges
 }
 
+func addStepForKey(key kv.Key, dpos int, step uint16) kv.Key {
+	bdkey := key[dpos : dpos+2]
+	idkey := binary.BigEndian.Uint16(bdkey)
+	iaddKey := idkey + step
+	ret := make([]byte, len(key))
+	copy(ret, key)
+	binary.BigEndian.PutUint16(ret[dpos:dpos+2], iaddKey)
+	return ret
+}
+
+func splitKeyRange(kr kv.KeyRange, count int) []kv.KeyRange {
+	sk, ek := kr.StartKey, kr.EndKey
+	lsk, lek := len(sk), len(ek)
+	diffSize := 0
+	diffStart := 0
+	if lsk == lek {
+		for i := 0; i < lsk; i++ {
+			if sk[i] != ek[i] {
+				diffSize = lsk - i
+				diffStart = i
+				break
+			}
+		}
+	} else if lsk > lek {
+		for i := 0; i < lek; i++ {
+			if sk[i] != ek[i] {
+				diffSize = lek - i + 1
+				if i-1 > 0 {
+					diffStart = i - 1
+				}
+				break
+			}
+		}
+	} else {
+		for i := 0; i < lsk; i++ {
+			if sk[i] != ek[i] {
+				diffSize = lsk - i + 1
+				if i-1 > 0 {
+					diffStart = i - 1
+				}
+				break
+			}
+		}
+	}
+	if diffSize < 2 {
+		return []kv.KeyRange{kr}
+	}
+	bdStart, bdEnd := sk[diffStart:diffStart+2], ek[diffStart:diffStart+2]
+	idStart, idEnd := binary.BigEndian.Uint16(bdStart), binary.BigEndian.Uint16(bdEnd)
+	step := (idEnd - idStart) / uint16(count)
+	if step < 10 {
+		return []kv.KeyRange{kr}
+	}
+	prevStartKey := sk
+	ret := make([]kv.KeyRange, count)
+	for i := 0; i < count; i++ {
+		if i == count-1 {
+			ret[i] = kv.KeyRange{
+				StartKey: prevStartKey,
+				EndKey:   ek,
+			}
+			break
+		}
+		endKey := addStepForKey(prevStartKey, diffStart, step)
+		ret[i] = kv.KeyRange{
+			StartKey: prevStartKey,
+			EndKey:   endKey,
+		}
+		prevStartKey = endKey
+	}
+	return ret
+}
+
+func splitCopRange(copRange *copRanges) []*copRanges {
+	kr := copRange.at(0)
+	skranges := splitKeyRange(kr, CoprocessorParallelLevel)
+	log.Debugf("Number Split Ranges: %d", len(skranges))
+	ret := make([]*copRanges, len(skranges))
+	for i, sk := range skranges {
+		log.Debugf("Split Ranges: [\n  %x\n  %x\n]", sk.StartKey, sk.EndKey)
+		ret[i] = &copRanges{
+			first: nil,
+			mid:   []kv.KeyRange{sk},
+			last:  nil,
+		}
+	}
+	return ret
+}
+
+func splitRanges(ranges *copRanges) []*copRanges {
+	if CoprocessorParallelLevel <= 1 {
+		return []*copRanges{ranges}
+	}
+	numRanges := ranges.len()
+	if numRanges == 1 {
+		return splitCopRange(ranges)
+	}
+	var ret []*copRanges = []*copRanges{}
+	if numRanges <= CoprocessorParallelLevel {
+		for i := 0; i < numRanges; i++ {
+			ret = append(ret, splitCopRange(ranges.slice(i, i+1))...)
+		}
+		return ret
+	}
+	step := numRanges / CoprocessorParallelLevel
+	i := 0
+	numTasks := 0
+	for i < numRanges {
+		nextPos := i + step
+		if numTasks+1 >= CoprocessorParallelLevel {
+			nextPos = numRanges
+		}
+		item := ranges.slice(i, nextPos)
+		ret = append(ret, item)
+		numTasks += 1
+		i = nextPos
+	}
+	return ret
+}
+
 func buildCopTasks(bo *Backoffer, cache *RegionCache, ranges *copRanges, desc bool) ([]*copTask, error) {
 	coprocessorCounter.WithLabelValues("build_task").Inc()
 
@@ -228,11 +353,13 @@ func buildCopTasks(bo *Backoffer, cache *RegionCache, ranges *copRanges, desc bo
 
 	var tasks []*copTask
 	appendTask := func(region RegionVerID, ranges *copRanges) {
-		tasks = append(tasks, &copTask{
-			region:   region,
-			ranges:   ranges,
-			respChan: make(chan copResponse, 1),
-		})
+		for _, splitedRanges := range splitRanges(ranges) {
+			tasks = append(tasks, &copTask{
+				region:   region,
+				ranges:   splitedRanges,
+				respChan: make(chan copResponse, 1),
+			})
+		}
 	}
 
 	for ranges.len() > 0 {
