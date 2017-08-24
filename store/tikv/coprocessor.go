@@ -30,7 +30,8 @@ import (
 )
 
 var (
-	CoprocessorParallelLevel = 2
+	//CoprocessorParallelLevel is coprocessor KeyRange split level
+	CoprocessorParallelLevel = 1
 )
 
 // CopClient is coprocessor client.
@@ -251,31 +252,33 @@ func splitKeyRange(kr kv.KeyRange, count int) []kv.KeyRange {
 	} else if lsk > lek {
 		for i := 0; i < lek; i++ {
 			if sk[i] != ek[i] {
-				diffSize = lek - i + 1
-				if i-1 > 0 {
-					diffStart = i - 1
-				}
+				diffSize = lek - i
+				diffStart = i
 				break
 			}
 		}
 	} else {
 		for i := 0; i < lsk; i++ {
 			if sk[i] != ek[i] {
-				diffSize = lsk - i + 1
-				if i-1 > 0 {
-					diffStart = i - 1
-				}
+				diffSize = lsk - i
+				diffStart = i
 				break
 			}
 		}
 	}
-	if diffSize < 2 {
+	if diffSize < 1 {
 		return []kv.KeyRange{kr}
+	}
+	if diffSize == 1 {
+		diffStart--
+		if diffStart < 0 {
+			return []kv.KeyRange{kr}
+		}
 	}
 	bdStart, bdEnd := sk[diffStart:diffStart+2], ek[diffStart:diffStart+2]
 	idStart, idEnd := binary.BigEndian.Uint16(bdStart), binary.BigEndian.Uint16(bdEnd)
 	step := (idEnd - idStart) / uint16(count)
-	if step < 10 {
+	if step < 32 {
 		return []kv.KeyRange{kr}
 	}
 	prevStartKey := sk
@@ -322,7 +325,7 @@ func splitRanges(ranges *copRanges) []*copRanges {
 	if numRanges == 1 {
 		return splitCopRange(ranges)
 	}
-	var ret []*copRanges = []*copRanges{}
+	ret := []*copRanges{}
 	if numRanges <= CoprocessorParallelLevel {
 		for i := 0; i < numRanges; i++ {
 			ret = append(ret, splitCopRange(ranges.slice(i, i+1))...)
@@ -339,7 +342,7 @@ func splitRanges(ranges *copRanges) []*copRanges {
 		}
 		item := ranges.slice(i, nextPos)
 		ret = append(ret, item)
-		numTasks += 1
+		numTasks++
 		i = nextPos
 	}
 	return ret

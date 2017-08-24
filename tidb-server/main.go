@@ -75,7 +75,7 @@ var (
 	queryLogMaxlen      = flag.Int("query-log-max-len", 2048, "Maximum query length recorded in log")
 	startXServer        = flagBoolean("xserver", false, "start tidb x protocol server")
 	tcpKeepAlive        = flagBoolean("tcp-keep-alive", false, "set keep alive option for tcp connection.")
-	copParallelLevel    = flag.Int("cop-parallel-level", 4, "coprocessor parallel level")
+	copParallelLevel    = flag.Int("cop-parallel-level", 1, "coprocessor parallel level")
 	timeJumpBackCounter = prometheus.NewCounter(
 		prometheus.CounterOpts{
 			Namespace: "tidb",
