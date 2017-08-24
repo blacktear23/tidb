@@ -30,7 +30,8 @@ import (
 )
 
 var (
-	//CoprocessorParallelLevel is coprocessor KeyRange split level
+	// CoprocessorParallelLevel is coprocessor KeyRange split level, as default 1 means disable KeyRange split feature.
+	// If enable CoprocessorParallelLevel, you will get DIFFERENT ORDER RESULT compare disable CoprocessorParallelLevel!
 	CoprocessorParallelLevel = 1
 )
 
