@@ -75,6 +75,7 @@ var (
 	queryLogMaxlen      = flag.Int("query-log-max-len", 2048, "Maximum query length recorded in log")
 	startXServer        = flagBoolean("xserver", false, "start tidb x protocol server")
 	tcpKeepAlive        = flagBoolean("tcp-keep-alive", false, "set keep alive option for tcp connection.")
+	copParallelLevel    = flag.Int("cop-parallel-level", 1, "coprocessor parallel level")
 	timeJumpBackCounter = prometheus.NewCounter(
 		prometheus.CounterOpts{
 			Namespace: "tidb",
@@ -213,6 +214,10 @@ func main() {
 
 func createStore() kv.Storage {
 	fullPath := fmt.Sprintf("%s://%s", *store, *storePath)
+	if *store == "tikv" {
+		tikv.CoprocessorParallelLevel = *copParallelLevel
+		log.Infof("Coprocessor Parallel Level: %d", *copParallelLevel)
+	}
 	store, err := tidb.NewStore(fullPath)
 	if err != nil {
 		log.Fatal(errors.ErrorStack(err))
