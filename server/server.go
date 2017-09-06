@@ -29,6 +29,7 @@
 package server
 
 import (
+	"fmt"
 	"math/rand"
 	"net"
 	"sync"
@@ -71,7 +72,8 @@ type Server struct {
 	// When a critical error occurred, we don't want to exit the process, because there may be
 	// a supervisor automatically restart it, then new client connection will be created, but we can't server it.
 	// So we just stop the listener and store to force clients to chose other TiDB servers.
-	stopListenerCh chan struct{}
+	stopListenerCh           chan struct{}
+	proxyProtocolConnBuilder *proxyProtocolConnBuilder
 }
 
 // ConnectionCount gets current connection count.
@@ -93,16 +95,14 @@ func (s *Server) releaseToken(token *Token) {
 
 // newConn creates a new *clientConn from a net.Conn.
 // It allocates a connection ID and random salt data for authentication.
-func (s *Server) newConn(conn net.Conn) *clientConn {
+func (s *Server) newConn(conn net.Conn) (*clientConn, error) {
 	cc := &clientConn{
-		conn:         conn,
-		pkt:          newPacketIO(conn),
 		server:       s,
 		connectionID: atomic.AddUint32(&baseConnID, 1),
 		collation:    mysql.DefaultCollationID,
 		alloc:        arena.NewAllocator(32 * 1024),
 	}
-	log.Infof("[%d] new connection %s", cc.connectionID, conn.RemoteAddr().String())
+
 	if s.cfg.TCPKeepAlive {
 		if tcpConn, ok := conn.(*net.TCPConn); ok {
 			if err := tcpConn.SetKeepAlive(true); err != nil {
@@ -110,8 +110,26 @@ func (s *Server) newConn(conn net.Conn) *clientConn {
 			}
 		}
 	}
+
+	if s.proxyProtocolConnBuilder != nil {
+		// Proxy is configured. wrap net.Conn to proxyProtocolConn
+		wconn, err := s.proxyProtocolConnBuilder.wrapConn(conn)
+		if err != nil {
+			return cc, errors.Trace(fmt.Errorf("%s (%s)", err.Error(), conn.RemoteAddr().String()))
+		}
+		cc.pkt = newPacketIO(wconn)
+		cc.conn = wconn
+		cc.clientAddr = wconn.RemoteAddr()
+		log.Infof("[%d] new connection %s (through proxy %s)", cc.connectionID, cc.clientAddr, conn.RemoteAddr().String())
+	} else {
+		cc.pkt = newPacketIO(conn)
+		cc.conn = conn
+		cc.clientAddr = conn.RemoteAddr()
+		log.Infof("[%d] new connection %s", cc.connectionID, conn.RemoteAddr().String())
+	}
+
 	cc.salt = util.RandomBuf(20)
-	return cc
+	return cc, nil
 }
 
 func (s *Server) skipAuth() bool {
@@ -122,16 +140,24 @@ const tokenLimit = 1000
 
 // NewServer creates a new Server.
 func NewServer(cfg *config.Config, driver IDriver) (*Server, error) {
+	var err error
+	var ppcb *proxyProtocolConnBuilder
+	if cfg.ProxyProtocolNetworks != "" {
+		ppcb, err = newProxyProtocolConnBuilder(cfg.ProxyProtocolNetworks, cfg.ProxyProtocolHeaderTimeout)
+		if err != nil {
+			log.Error("ProxyProtocolNetworks parameter is not valid")
+		}
+	}
 	s := &Server{
-		cfg:               cfg,
-		driver:            driver,
-		concurrentLimiter: NewTokenLimiter(tokenLimit),
-		rwlock:            &sync.RWMutex{},
-		clients:           make(map[uint32]*clientConn),
-		stopListenerCh:    make(chan struct{}, 1),
+		cfg:                      cfg,
+		driver:                   driver,
+		concurrentLimiter:        NewTokenLimiter(tokenLimit),
+		rwlock:                   &sync.RWMutex{},
+		clients:                  make(map[uint32]*clientConn),
+		stopListenerCh:           make(chan struct{}, 1),
+		proxyProtocolConnBuilder: ppcb,
 	}
 
-	var err error
 	if cfg.Socket != "" {
 		cfg.SkipAuth = true
 		if s.listener, err = net.Listen("unix", cfg.Socket); err == nil {
@@ -148,6 +174,13 @@ func NewServer(cfg *config.Config, driver IDriver) (*Server, error) {
 
 	// Init rand seed for randomBuf()
 	rand.Seed(time.Now().UTC().UnixNano())
+
+	if ppcb != nil {
+		log.Infof("Server run MySQL Protocol (through PROXY Protocol) Listen at [%s]", s.cfg.Addr)
+	} else {
+		log.Infof("Server run MySQL Protocol Listen at [%s]", s.cfg.Addr)
+	}
+
 	return s, nil
 }
 
@@ -204,15 +237,21 @@ func (s *Server) Close() {
 
 // onConn runs in its own goroutine, handles queries from this connection.
 func (s *Server) onConn(c net.Conn) {
-	conn := s.newConn(c)
+	conn, err := s.newConn(c)
 	defer func() {
 		log.Infof("[%d] close connection", conn.connectionID)
 	}()
 
+	if err != nil {
+		log.Infof("Connection error: %s", errors.ErrorStack(err))
+		c.Close()
+		return
+	}
+
 	if err := conn.handshake(); err != nil {
 		// Some keep alive services will send request to TiDB and disconnect immediately.
 		// So we use info log level.
-		log.Infof("handshake error %s", errors.ErrorStack(err))
+		log.Infof("Handshake error: %s", errors.ErrorStack(err))
 		c.Close()
 		return
 	}
