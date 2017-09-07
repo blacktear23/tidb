@@ -834,6 +834,17 @@ func (s *testIntegrationSuite) TestStringBuiltin(c *C) {
 	result.Check(testkit.Rows("'aaaa' '' '\"\"' '\n\n'"))
 	result = tk.MustQuery(`select quote(0121), quote(0000), quote("中文"), quote(NULL);`)
 	result.Check(testkit.Rows("'121' '0' '中文' <nil>"))
+
+	// for format
+	result = tk.MustQuery(`select format(12332.1, 4), format(12332.2, 0), format(12332.2, 2,'en_US');`)
+	result.Check(testkit.Rows("12,332.1000 12,332 12,332.20"))
+	result = tk.MustQuery(`select format(NULL, 4), format(12332.2, NULL);`)
+	result.Check(testkit.Rows("<nil> <nil>"))
+	rs, err := tk.Exec(`select format(12332.2, 2,'es_EC');`)
+	c.Assert(err, IsNil)
+	_, err = tidb.GetRows(rs)
+	c.Assert(err, NotNil)
+	c.Assert(err.Error(), Matches, "not support for the specific locale")
 }
 
 func (s *testIntegrationSuite) TestEncryptionBuiltin(c *C) {
@@ -2269,6 +2280,22 @@ func (s *testIntegrationSuite) TestCompareBuiltin(c *C) {
 	tk.MustExec("create table t(a date)")
 	result = tk.MustQuery("desc select a = a from t")
 	result.Check(testkit.Rows("TableScan_3   cop table:t, range:(-inf,+inf), keep order:false 8000", "TableReader_4 Projection_2  root data:TableScan_3 8000", "Projection_2  TableReader_4 root eq(test.t.a, test.t.a) 8000"))
+
+	// for interval
+	result = tk.MustQuery(`select interval(null, 1, 2), interval(1, 2, 3), interval(2, 1, 3)`)
+	result.Check(testkit.Rows("-1 0 1"))
+	result = tk.MustQuery(`select interval(3, 1, 2), interval(0, "b", "1", "2"), interval("a", "b", "1", "2")`)
+	result.Check(testkit.Rows("2 1 1"))
+	result = tk.MustQuery(`select interval(23, 1, 23, 23, 23, 30, 44, 200), interval(23, 1.7, 15.3, 23.1, 30, 44, 200), interval(9007199254740992, 9007199254740993)`)
+	result.Check(testkit.Rows("4 2 0"))
+	result = tk.MustQuery(`select interval(cast(9223372036854775808 as unsigned), cast(9223372036854775809 as unsigned)), interval(9223372036854775807, cast(9223372036854775808 as unsigned)), interval(-9223372036854775807, cast(9223372036854775808 as unsigned))`)
+	result.Check(testkit.Rows("0 0 0"))
+	result = tk.MustQuery(`select interval(cast(9223372036854775806 as unsigned), 9223372036854775807), interval(cast(9223372036854775806 as unsigned), -9223372036854775807), interval("9007199254740991", "9007199254740992")`)
+	result.Check(testkit.Rows("0 1 0"))
+	result = tk.MustQuery(`select interval(9007199254740992, "9007199254740993"), interval("9007199254740992", 9007199254740993), interval("9007199254740992", "9007199254740993")`)
+	result.Check(testkit.Rows("1 1 1"))
+	result = tk.MustQuery(`select INTERVAL(100, NULL, NULL, NULL, NULL, NULL, 100);`)
+	result.Check(testkit.Rows("6"))
 }
 
 func (s *testIntegrationSuite) TestAggregationBuiltin(c *C) {
@@ -2358,4 +2385,49 @@ func (s *testIntegrationSuite) TestLiterals(c *C) {
 	tk := testkit.NewTestKit(c, s.store)
 	r := tk.MustQuery("SELECT LENGTH(b''), LENGTH(B''), b''+1, b''-1, B''+1;")
 	r.Check(testkit.Rows("0 0 1 -1 1"))
+}
+
+func (s *testIntegrationSuite) TestFuncJSON(c *C) {
+	tk := testkit.NewTestKit(c, s.store)
+	defer func() {
+		s.cleanEnv(c)
+		testleak.AfterTest(c)()
+	}()
+	tk.MustExec("USE test;")
+	tk.MustExec("DROP TABLE IF EXISTS table_json;")
+	tk.MustExec("CREATE TABLE table_json(a json, b VARCHAR(255));")
+
+	j1 := `{"\\"hello\\"": "world", "a": [1, "2", {"aa": "bb"}, 4.0, {"aa": "cc"}], "b": true, "c": ["d"]}`
+	j2 := `[{"a": 1, "b": true}, 3, 3.5, "hello, world", null, true]`
+	for _, j := range []string{j1, j2} {
+		tk.MustExec(fmt.Sprintf(`INSERT INTO table_json values('%s', '%s')`, j, j))
+	}
+
+	var r *testkit.Result
+	r = tk.MustQuery(`select json_type(a), json_type(b) from table_json`)
+	r.Check(testkit.Rows("OBJECT OBJECT", "ARRAY ARRAY"))
+
+	r = tk.MustQuery(`select json_unquote('hello'), json_unquote('world')`)
+	r.Check(testkit.Rows("hello world"))
+
+	r = tk.MustQuery(`select json_extract(a, '$.a[1]'), json_extract(b, '$.b') from table_json`)
+	r.Check(testkit.Rows("\"2\" true", "<nil> <nil>"))
+
+	r = tk.MustQuery(`select json_extract(json_set(a, '$.a[1]', 3), '$.a[1]'), json_extract(json_set(b, '$.b', false), '$.b') from table_json`)
+	r.Check(testkit.Rows("3 false", "<nil> <nil>"))
+
+	r = tk.MustQuery(`select json_extract(json_insert(a, '$.a[1]', 3), '$.a[1]'), json_extract(json_insert(b, '$.b', false), '$.b') from table_json`)
+	r.Check(testkit.Rows("\"2\" true", "<nil> <nil>"))
+
+	r = tk.MustQuery(`select json_extract(json_replace(a, '$.a[1]', 3), '$.a[1]'), json_extract(json_replace(b, '$.b', false), '$.b') from table_json`)
+	r.Check(testkit.Rows("3 false", "<nil> <nil>"))
+
+	r = tk.MustQuery(`select json_extract(json_merge(a, cast(b as JSON)), '$[0].a[0]') from table_json`)
+	r.Check(testkit.Rows("1", "1"))
+
+	r = tk.MustQuery(`select json_extract(json_array(1,2,3), '$[1]')`)
+	r.Check(testkit.Rows("2"))
+
+	r = tk.MustQuery(`select json_extract(json_object(1,2,3,4), '$."1"')`)
+	r.Check(testkit.Rows("2"))
 }
