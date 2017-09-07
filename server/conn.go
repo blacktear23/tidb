@@ -61,7 +61,7 @@ import (
 // handles client query.
 type clientConn struct {
 	pkt          *packetIO         // a helper to read and write data in packet format.
-	bufReadConn  *bufferedReadConn // a buffered-read net.Conn or buffered-read tls.Conn.
+	bufReadConn  bufferedReadConn  // a buffered-read net.Conn or buffered-read tls.Conn.
 	tlsConn      *tls.Conn         // TLS connection, nil if not TLS.
 	server       *Server           // a reference of server instance.
 	capability   uint32            // client capability affects the way server handles client request.
@@ -861,7 +861,11 @@ func (cc *clientConn) writeMultiResultset(rss []ResultSet, binary bool) error {
 }
 
 func (cc *clientConn) setConn(conn net.Conn) {
-	cc.bufReadConn = newBufferedReadConn(conn)
+	cc.setBufferedReadConn(newBufferedReadConn(conn))
+}
+
+func (cc *clientConn) setBufferedReadConn(conn bufferedReadConn) {
+	cc.bufReadConn = conn
 	if cc.pkt == nil {
 		cc.pkt = newPacketIO(cc.bufReadConn)
 	} else {
@@ -871,6 +875,7 @@ func (cc *clientConn) setConn(conn net.Conn) {
 }
 
 func (cc *clientConn) upgradeToTLS(tlsConfig *tls.Config) error {
+	log.Info("Upgrade to TLS")
 	// Important: read from buffered reader instead of the original net.Conn because it may contain data we need.
 	tlsConn := tls.Server(cc.bufReadConn, tlsConfig)
 	if err := tlsConn.Handshake(); err != nil {

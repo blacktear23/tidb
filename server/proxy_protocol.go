@@ -14,6 +14,7 @@
 package server
 
 import (
+	"bufio"
 	"bytes"
 	"encoding/binary"
 	"fmt"
@@ -79,10 +80,10 @@ func newProxyProtocolConnBuilder(allowedIPs string, headerReadTimeout int) (*pro
 	}, nil
 }
 
-func (b *proxyProtocolConnBuilder) wrapConn(conn net.Conn) (*proxyProtocolConn, error) {
+func (b *proxyProtocolConnBuilder) wrapConn(conn bufferedReadConn) (*proxyProtocolConn, error) {
 	ppconn := &proxyProtocolConn{
-		Conn:    conn,
-		builder: b,
+		bufferedReadConn: conn,
+		builder:          b,
 	}
 	err := ppconn.readClientAddrBehindProxy()
 	return ppconn, errors.Trace(err)
@@ -106,17 +107,13 @@ func (b *proxyProtocolConnBuilder) checkAllowed(raddr net.Addr) bool {
 }
 
 type proxyProtocolConn struct {
-	net.Conn
-	builder            *proxyProtocolConnBuilder
-	clientIP           net.Addr
-	exceedBuffer       []byte
-	exceedBufferStart  int
-	exceedBufferLen    int
-	exceedBufferReaded bool
+	bufferedReadConn
+	builder  *proxyProtocolConnBuilder
+	clientIP net.Addr
 }
 
 func (c *proxyProtocolConn) readClientAddrBehindProxy() error {
-	connRemoteAddr := c.Conn.RemoteAddr()
+	connRemoteAddr := c.bufferedReadConn.RemoteAddr()
 	allowed := c.builder.checkAllowed(connRemoteAddr)
 	if !allowed {
 		return errProxyAddressNotAllowed
@@ -212,54 +209,25 @@ func (c *proxyProtocolConn) RemoteAddr() net.Addr {
 	return c.clientIP
 }
 
-func (c *proxyProtocolConn) Read(buffer []byte) (int, error) {
-	if c.exceedBufferReaded {
-		return c.Conn.Read(buffer)
-	}
-	if c.exceedBufferLen == 0 || c.exceedBufferStart >= c.exceedBufferLen {
-		c.exceedBufferReaded = true
-		return c.Conn.Read(buffer)
-	}
-
-	buflen := len(buffer)
-	nExceedRead := c.exceedBufferLen - c.exceedBufferStart
-	// buffer length is less or equals than exceedBuffer length
-	if nExceedRead >= buflen {
-		copy(buffer[0:], c.exceedBuffer[c.exceedBufferStart:c.exceedBufferStart+buflen])
-		c.exceedBufferStart += buflen
-		return buflen, nil
-	}
-	// buffer length is great than exceedBuffer length
-	copy(buffer[0:nExceedRead], c.exceedBuffer[c.exceedBufferStart:])
-	n, err := c.Conn.Read(buffer[nExceedRead-1:])
-	if err == nil {
-		// If read is success set buffer start to buffer length
-		// If fail make rest buffer can be read in next time
-		c.exceedBufferStart = c.exceedBufferLen
-		return n + nExceedRead - 1, nil
-	}
-	return 0, errors.Trace(err)
-}
-
 func (c *proxyProtocolConn) readHeader() (int, []byte, error) {
-	buf := make([]byte, proxyProtocolV1MaxHeaderLen)
 	// This mean all header data should be read in headerReadTimeout seconds.
-	c.Conn.SetReadDeadline(time.Now().Add(time.Duration(c.builder.headerReadTimeout) * time.Second))
+	c.bufferedReadConn.SetReadDeadline(time.Now().Add(time.Duration(c.builder.headerReadTimeout) * time.Second))
 	// When function return clean read deadline.
-	defer c.Conn.SetReadDeadline(time.Time{})
-	n, err := c.Conn.Read(buf)
-	if err != nil {
+	defer c.bufferedReadConn.SetReadDeadline(time.Time{})
+	buf, err := c.bufferedReadConn.Peek(proxyProtocolV1MaxHeaderLen)
+	if err != nil && err != bufio.ErrBufferFull {
 		return unknownProtocol, nil, errors.Trace(err)
 	}
+	n := len(buf)
 	if n >= 16 {
 		if bytes.Equal(buf[0:12], proxyProtocolV2Sig) && (buf[v2CmdPos]&0xF0) == 0x20 {
 			endPos := 16 + int(binary.BigEndian.Uint16(buf[v2LenPos:v2LenPos+2]))
 			if n < endPos {
 				return unknownProtocol, nil, errProxyProtocolV2HeaderInvalid
 			}
-			if n > endPos {
-				c.exceedBuffer = buf[endPos:]
-				c.exceedBufferLen = n - endPos + 1
+			_, err := c.bufferedReadConn.Discard(endPos)
+			if err != nil {
+				return unknownProtocol, nil, errProxyProtocolV2HeaderInvalid
 			}
 			return proxyProtocolV2, buf[0:endPos], nil
 		}
@@ -269,18 +237,18 @@ func (c *proxyProtocolConn) readHeader() (int, []byte, error) {
 			return unknownProtocol, nil, errProxyProtocolV1HeaderInvalid
 		}
 		pos := bytes.IndexByte(buf, byte(10))
-		if pos == -1 {
+		if pos == -1 || pos == 0 {
 			return unknownProtocol, nil, errProxyProtocolV1HeaderInvalid
 		}
 		if buf[pos-1] != byte(13) {
 			return unknownProtocol, nil, errProxyProtocolV1HeaderInvalid
 		}
-		endPos := pos
-		if n > endPos {
-			c.exceedBuffer = buf[endPos+1:]
-			c.exceedBufferLen = n - endPos
+		endPos := pos + 1
+		_, err := c.bufferedReadConn.Discard(endPos)
+		if err != nil {
+			return unknownProtocol, nil, errProxyProtocolV1HeaderInvalid
 		}
-		return proxyProtocolV1, buf[0 : endPos+1], nil
+		return proxyProtocolV1, buf[0:endPos], nil
 	}
 	return unknownProtocol, nil, errProxyProtocolV1HeaderInvalid
 }

@@ -16,6 +16,7 @@ package server
 import (
 	"bytes"
 	"encoding/binary"
+	"io"
 	"net"
 	"time"
 
@@ -31,11 +32,19 @@ type mockBufferConn struct {
 	raddr net.Addr
 }
 
-func newMockBufferConn(buffer *bytes.Buffer, raddr net.Addr) net.Conn {
-	return &mockBufferConn{
+func newMockBufferConn(buffer *bytes.Buffer, raddr net.Addr) bufferedReadConn {
+	return newBufferedReadConn(&mockBufferConn{
 		Buffer: buffer,
 		raddr:  raddr,
+	})
+}
+
+func (c *mockBufferConn) Read(buf []byte) (int, error) {
+	n, err := c.Buffer.Read(buf)
+	if err != nil && err != io.EOF {
+		return n, err
 	}
+	return n, nil
 }
 
 func (c *mockBufferConn) Close() error {
@@ -139,13 +148,11 @@ func (ts ProxyProtocolConnTestSuite) TestProxyProtocolV1HeaderRead(c *C) {
 	expectedString := "PROXY TCP4 192.168.1.100 192.168.1.50 5678 3306\r\n"
 	conn := newMockBufferConn(bytes.NewBuffer(buffer), nil)
 	ppb, _ := newProxyProtocolConnBuilder("*", 5)
-	wconn := &proxyProtocolConn{
-		Conn:    conn,
-		builder: ppb,
-	}
-	ver, buf, err := wconn.readHeader()
-	c.Assert(ver, Equals, proxyProtocolV1)
+	wconn, err := ppb.wrapConn(conn)
 	c.Assert(err, IsNil)
+	ver, buf, err := wconn.readHeader()
+	c.Assert(err, IsNil)
+	c.Assert(ver, Equals, proxyProtocolV1)
 	c.Assert(string(buf), Equals, expectedString)
 }
 
