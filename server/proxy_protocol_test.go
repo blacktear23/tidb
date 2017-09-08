@@ -148,8 +148,10 @@ func (ts ProxyProtocolConnTestSuite) TestProxyProtocolV1HeaderRead(c *C) {
 	expectedString := "PROXY TCP4 192.168.1.100 192.168.1.50 5678 3306\r\n"
 	conn := newMockBufferConn(bytes.NewBuffer(buffer), nil)
 	ppb, _ := newProxyProtocolConnBuilder("*", 5)
-	wconn, err := ppb.wrapConn(conn)
-	c.Assert(err, IsNil)
+	wconn := &proxyProtocolConn{
+		bufferedReadConn: conn,
+		builder:          ppb,
+	}
 	ver, buf, err := wconn.readHeader()
 	c.Assert(err, IsNil)
 	c.Assert(ver, Equals, proxyProtocolV1)

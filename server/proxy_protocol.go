@@ -214,7 +214,17 @@ func (c *proxyProtocolConn) readHeader() (int, []byte, error) {
 	c.bufferedReadConn.SetReadDeadline(time.Now().Add(time.Duration(c.builder.headerReadTimeout) * time.Second))
 	// When function return clean read deadline.
 	defer c.bufferedReadConn.SetReadDeadline(time.Time{})
-	buf, err := c.bufferedReadConn.Peek(proxyProtocolV1MaxHeaderLen)
+
+	// Below is a workaround for bufio.Reader
+	// need to peek 1 byte to let bufio.Reader fill buffer
+	c.bufferedReadConn.Peek(1)
+	// Calculate min size to peek, peekSize should not greater than bufio.Reader buffered size
+	peekSize := c.bufferedReadConn.Buffered()
+	if peekSize > proxyProtocolV1MaxHeaderLen {
+		peekSize = proxyProtocolV1MaxHeaderLen
+	}
+
+	buf, err := c.bufferedReadConn.Peek(peekSize)
 	if err != nil && err != bufio.ErrBufferFull {
 		return unknownProtocol, nil, errors.Trace(err)
 	}

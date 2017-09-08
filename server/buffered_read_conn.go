@@ -25,6 +25,7 @@ type bufferedReadConn interface {
 	net.Conn
 	Peek(n int) ([]byte, error)
 	Discard(n int) (int, error)
+	Buffered() int
 }
 
 // bufReadConn is a implements for bufferedReadConn
@@ -43,6 +44,10 @@ func (conn bufReadConn) Peek(n int) ([]byte, error) {
 
 func (conn bufReadConn) Discard(n int) (int, error) {
 	return conn.rb.Discard(n)
+}
+
+func (conn bufReadConn) Buffered() int {
+	return conn.rb.Buffered()
 }
 
 func newBufferedReadConn(conn net.Conn) bufferedReadConn {
