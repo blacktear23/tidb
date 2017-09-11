@@ -76,9 +76,13 @@ var (
 	startXServer               = flagBoolean("xserver", false, "start tidb x protocol server")
 	tcpKeepAlive               = flagBoolean("tcp-keep-alive", false, "set keep alive option for tcp connection.")
 	copParallelLevel           = flag.Int("cop-parallel-level", 1, "coprocessor parallel level")
+	sslCAPath                  = flag.String("ssl-ca", "", "Path of file that contains list of trusted SSL CAs")
+	sslCertPath                = flag.String("ssl-cert", "", "Path of file that contains X509 certificate in PEM format")
+	sslKeyPath                 = flag.String("ssl-key", "", "Path of file that contains X509 key in PEM format")
 	proxyProtocolNetworks      = flag.String("proxy-protocol-networks", "", "proxy protocol networks allowed IP or *, empty mean disable proxy protocol support")
 	proxyProtocolHeaderTimeout = flag.Int("proxy-protocol-header-timeout", 5, "proxy protocol header read timeout, unit is second.")
-	timeJumpBackCounter        = prometheus.NewCounter(
+
+	timeJumpBackCounter = prometheus.NewCounter(
 		prometheus.CounterOpts{
 			Namespace: "tidb",
 			Subsystem: "monitor",
@@ -124,6 +128,9 @@ func main() {
 	cfg.ProxyProtocolNetworks = *proxyProtocolNetworks
 	cfg.ProxyProtocolHeaderTimeout = *proxyProtocolHeaderTimeout
 	cfg.TCPKeepAlive = *tcpKeepAlive
+	cfg.SSLCAPath = *sslCAPath
+	cfg.SSLCertPath = *sslCertPath
+	cfg.SSLKeyPath = *sslKeyPath
 
 	xcfg := &xserver.Config{
 		Addr:     fmt.Sprintf("%s:%s", *xhost, *xport),
