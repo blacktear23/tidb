@@ -18,11 +18,10 @@ import (
 	"fmt"
 	"os"
 	"strconv"
-	"sync"
 	"time"
 
+	log "github.com/Sirupsen/logrus"
 	"github.com/juju/errors"
-	"github.com/ngaut/log"
 	"github.com/pingcap/kvproto/pkg/kvrpcpb"
 	"github.com/pingcap/tidb"
 	"github.com/pingcap/tidb/ddl"
@@ -39,7 +38,6 @@ type GCWorker struct {
 	uuid        string
 	desc        string
 	store       *tikvStore
-	session     tidb.Session
 	gcIsRunning bool
 	lastFinish  time.Time
 	cancel      goctx.CancelFunc
@@ -66,10 +64,7 @@ func NewGCWorker(store kv.Storage) (*GCWorker, error) {
 	}
 	var ctx goctx.Context
 	ctx, worker.cancel = goctx.WithCancel(goctx.Background())
-	var wg sync.WaitGroup
-	wg.Add(1)
-	go worker.start(ctx, &wg)
-	wg.Wait() // Wait create session finish in worker, some test code depend on this to avoid race.
+	go worker.start(ctx)
 	return worker, nil
 }
 
@@ -107,12 +102,9 @@ var gcVariableComments = map[string]string{
 	gcSafePointKey:   "All versions after safe point can be accessed. (DO NOT EDIT)",
 }
 
-func (w *GCWorker) start(ctx goctx.Context, wg *sync.WaitGroup) {
+func (w *GCWorker) start(ctx goctx.Context) {
 	log.Infof("[gc worker] %s start.", w.uuid)
-
-	w.createSession()
 	w.tick(ctx) // Immediately tick once to initialize configs.
-	wg.Done()
 
 	ticker := time.NewTicker(gcWorkerTickInterval)
 	defer ticker.Stop()
@@ -134,18 +126,17 @@ func (w *GCWorker) start(ctx goctx.Context, wg *sync.WaitGroup) {
 	}
 }
 
-func (w *GCWorker) createSession() {
+func createSession(store kv.Storage) tidb.Session {
 	for {
-		var err error
-		w.session, err = tidb.CreateSession(w.store)
+		session, err := tidb.CreateSession(store)
 		if err != nil {
 			log.Warnf("[gc worker] create session err: %v", err)
 			continue
 		}
 		// Disable privilege check for gc worker session.
-		privilege.BindPrivilegeManager(w.session, nil)
-		w.session.GetSessionVars().InRestrictedSQL = true
-		return
+		privilege.BindPrivilegeManager(session, nil)
+		session.GetSessionVars().InRestrictedSQL = true
+		return session
 	}
 }
 
@@ -317,7 +308,9 @@ func (w *GCWorker) runGCJob(ctx goctx.Context, safePoint uint64) {
 func (w *GCWorker) deleteRanges(ctx goctx.Context, safePoint uint64) error {
 	gcWorkerCounter.WithLabelValues("delete_range").Inc()
 
-	ranges, err := ddl.LoadDeleteRanges(w.session, safePoint)
+	session := createSession(w.store)
+	ranges, err := ddl.LoadDeleteRanges(session, safePoint)
+	session.Close()
 	if err != nil {
 		return errors.Trace(err)
 	}
@@ -381,7 +374,9 @@ func (w *GCWorker) deleteRanges(ctx goctx.Context, safePoint uint64) error {
 			}
 			startKey = endKey
 		}
-		err := ddl.CompleteDeleteRange(w.session, r)
+		session := createSession(w.store)
+		err := ddl.CompleteDeleteRange(session, r)
+		session.Close()
 		if err != nil {
 			return errors.Trace(err)
 		}
@@ -529,24 +524,26 @@ func doGC(ctx goctx.Context, store *tikvStore, safePoint uint64, identifier stri
 
 func (w *GCWorker) checkLeader() (bool, error) {
 	gcWorkerCounter.WithLabelValues("check_leader").Inc()
+	session := createSession(w.store)
+	defer session.Close()
 
-	_, err := w.session.Execute("BEGIN")
+	_, err := session.Execute("BEGIN")
 	if err != nil {
 		return false, errors.Trace(err)
 	}
 	leader, err := w.loadValueFromSysTable(gcLeaderUUIDKey)
 	if err != nil {
-		w.session.Execute("ROLLBACK")
+		session.Execute("ROLLBACK")
 		return false, errors.Trace(err)
 	}
 	log.Debugf("[gc worker] got leader: %s", leader)
 	if leader == w.uuid {
 		err = w.saveTime(gcLeaderLeaseKey, time.Now().Add(gcWorkerLease))
 		if err != nil {
-			w.session.Execute("ROLLBACK")
+			session.Execute("ROLLBACK")
 			return false, errors.Trace(err)
 		}
-		_, err = w.session.Execute("COMMIT")
+		_, err = session.Execute("COMMIT")
 		if err != nil {
 			return false, errors.Trace(err)
 		}
@@ -562,26 +559,26 @@ func (w *GCWorker) checkLeader() (bool, error) {
 
 		err = w.saveValueToSysTable(gcLeaderUUIDKey, w.uuid)
 		if err != nil {
-			w.session.Execute("ROLLBACK")
+			session.Execute("ROLLBACK")
 			return false, errors.Trace(err)
 		}
 		err = w.saveValueToSysTable(gcLeaderDescKey, w.desc)
 		if err != nil {
-			w.session.Execute("ROLLBACK")
+			session.Execute("ROLLBACK")
 			return false, errors.Trace(err)
 		}
 		err = w.saveTime(gcLeaderLeaseKey, time.Now().Add(gcWorkerLease))
 		if err != nil {
-			w.session.Execute("ROLLBACK")
+			session.Execute("ROLLBACK")
 			return false, errors.Trace(err)
 		}
-		_, err = w.session.Execute("COMMIT")
+		_, err = session.Execute("COMMIT")
 		if err != nil {
 			return false, errors.Trace(err)
 		}
 		return true, nil
 	}
-	w.session.Execute("ROLLBACK")
+	session.Execute("ROLLBACK")
 	return false, nil
 }
 
@@ -641,8 +638,11 @@ func (w *GCWorker) loadDurationWithDefault(key string, def time.Duration) (*time
 }
 
 func (w *GCWorker) loadValueFromSysTable(key string) (string, error) {
+	session := createSession(w.store)
+	defer session.Close()
+
 	stmt := fmt.Sprintf(`SELECT (variable_value) FROM mysql.tidb WHERE variable_name='%s' FOR UPDATE`, key)
-	rs, err := w.session.Execute(stmt)
+	rs, err := session.Execute(stmt)
 	if err != nil {
 		return "", errors.Trace(err)
 	}
@@ -660,11 +660,14 @@ func (w *GCWorker) loadValueFromSysTable(key string) (string, error) {
 }
 
 func (w *GCWorker) saveValueToSysTable(key, value string) error {
+	session := createSession(w.store)
+	defer session.Close()
+
 	stmt := fmt.Sprintf(`INSERT INTO mysql.tidb VALUES ('%[1]s', '%[2]s', '%[3]s')
 			       ON DUPLICATE KEY
 			       UPDATE variable_value = '%[2]s', comment = '%[3]s'`,
 		key, value, gcVariableComments[key])
-	_, err := w.session.Execute(stmt)
+	_, err := session.Execute(stmt)
 	log.Debugf("[gc worker] save kv, %s:%s %v", key, value, err)
 	return errors.Trace(err)
 }
@@ -692,13 +695,6 @@ func NewMockGCWorker(store kv.Storage) (*MockGCWorker, error) {
 		lastFinish:  time.Now(),
 		done:        make(chan error),
 	}
-	worker.session, err = tidb.CreateSession(worker.store)
-	if err != nil {
-		log.Errorf("initialize MockGCWorker session fail: %s", err)
-		return nil, errors.Trace(err)
-	}
-	privilege.BindPrivilegeManager(worker.session, nil)
-	worker.session.GetSessionVars().InRestrictedSQL = true
 	return &MockGCWorker{worker: worker}, nil
 }
 

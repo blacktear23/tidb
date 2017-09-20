@@ -22,6 +22,7 @@ import (
 	"github.com/juju/errors"
 	"github.com/pingcap/tidb/ast"
 	"github.com/pingcap/tidb/expression"
+	"github.com/pingcap/tidb/expression/aggregation"
 	"github.com/pingcap/tidb/infoschema"
 	"github.com/pingcap/tidb/model"
 	"github.com/pingcap/tidb/mysql"
@@ -44,9 +45,9 @@ type idAllocator struct {
 	id int
 }
 
-func (a *idAllocator) allocID() string {
+func (a *idAllocator) allocID() int {
 	a.id++
-	return fmt.Sprintf("_%d", a.id)
+	return a.id
 }
 
 func (p *LogicalAggregation) collectGroupByColumns() {
@@ -62,7 +63,7 @@ func (b *planBuilder) buildAggregation(p LogicalPlan, aggFuncList []*ast.Aggrega
 	b.optFlag = b.optFlag | flagBuildKeyInfo
 	b.optFlag = b.optFlag | flagAggregationOptimize
 
-	agg := LogicalAggregation{AggFuncs: make([]expression.AggregationFunction, 0, len(aggFuncList))}.init(b.allocator, b.ctx)
+	agg := LogicalAggregation{AggFuncs: make([]aggregation.Aggregation, 0, len(aggFuncList))}.init(b.allocator, b.ctx)
 	schema := expression.NewSchema(make([]*expression.Column, 0, len(aggFuncList)+p.Schema().Len())...)
 	// aggIdxMap maps the old index to new index after applying common aggregation functions elimination.
 	aggIndexMap := make(map[int]int)
@@ -77,7 +78,7 @@ func (b *planBuilder) buildAggregation(p LogicalPlan, aggFuncList []*ast.Aggrega
 			p = np
 			newArgList = append(newArgList, newArg)
 		}
-		newFunc := expression.NewAggFunction(aggFunc.F, newArgList, aggFunc.Distinct)
+		newFunc := aggregation.NewAggFunction(aggFunc.F, newArgList, aggFunc.Distinct)
 		combined := false
 		for j, oldFunc := range agg.AggFuncs {
 			if oldFunc.Equal(newFunc, b.ctx) {
@@ -92,14 +93,14 @@ func (b *planBuilder) buildAggregation(p LogicalPlan, aggFuncList []*ast.Aggrega
 			agg.AggFuncs = append(agg.AggFuncs, newFunc)
 			schema.Append(&expression.Column{
 				FromID:      agg.id,
-				ColName:     model.NewCIStr(fmt.Sprintf("%s_col_%d", agg.id, position)),
+				ColName:     model.NewCIStr(fmt.Sprintf("%d_col_%d", agg.id, position)),
 				Position:    position,
 				IsAggOrSubq: true,
 				RetType:     newFunc.GetType()})
 		}
 	}
 	for _, col := range p.Schema().Columns {
-		newFunc := expression.NewAggFunction(ast.AggFuncFirstRow, []expression.Expression{col.Clone()}, false)
+		newFunc := aggregation.NewAggFunction(ast.AggFuncFirstRow, []expression.Expression{col.Clone()}, false)
 		agg.AggFuncs = append(agg.AggFuncs, newFunc)
 		schema.Append(col.Clone().(*expression.Column))
 	}
@@ -344,13 +345,13 @@ func (b *planBuilder) coalesceCommonColumns(p *LogicalJoin, leftPlan, rightPlan 
 				filter[lCol.ColName.L] = false
 			}
 
-			col := rColumns[i]
-			copy(rColumns[commonLen+1:i+1], rColumns[commonLen:i])
-			rColumns[commonLen] = col
-
-			col = lColumns[j]
-			copy(lColumns[commonLen+1:j+1], lColumns[commonLen:j])
+			col := lColumns[i]
+			copy(lColumns[commonLen+1:i+1], lColumns[commonLen:i])
 			lColumns[commonLen] = col
+
+			col = rColumns[j]
+			copy(rColumns[commonLen+1:j+1], rColumns[commonLen:j])
+			rColumns[commonLen] = col
 
 			commonLen++
 			break
@@ -369,19 +370,19 @@ func (b *planBuilder) coalesceCommonColumns(p *LogicalJoin, leftPlan, rightPlan 
 	copy(schemaCols[:len(lColumns)], lColumns)
 	copy(schemaCols[len(lColumns):], rColumns[commonLen:])
 
-	conds := make([]*expression.ScalarFunction, 0, commonLen)
+	conds := make([]expression.Expression, 0, commonLen)
 	for i := 0; i < commonLen; i++ {
 		lc, rc := lsc.Columns[i], rsc.Columns[i]
 		cond, err := expression.NewFunction(b.ctx, ast.EQ, types.NewFieldType(mysql.TypeTiny), lc, rc)
 		if err != nil {
 			return errors.Trace(err)
 		}
-		conds = append(conds, cond.(*expression.ScalarFunction))
+		conds = append(conds, cond)
 	}
 
 	p.SetSchema(expression.NewSchema(schemaCols...))
 	p.redundantSchema = expression.MergeSchema(p.redundantSchema, expression.NewSchema(rColumns[:commonLen]...))
-	p.EqualConditions = append(conds, p.EqualConditions...)
+	p.OtherConditions = append(conds, p.OtherConditions...)
 
 	return nil
 }
@@ -462,7 +463,7 @@ func (b *planBuilder) buildProjectionFieldNameFromExpressions(field *ast.SelectF
 }
 
 // buildProjectionField builds the field object according to SelectField in projection.
-func (b *planBuilder) buildProjectionField(id string, position int, field *ast.SelectField, expr expression.Expression) *expression.Column {
+func (b *planBuilder) buildProjectionField(id, position int, field *ast.SelectField, expr expression.Expression) *expression.Column {
 	var tblName, colName model.CIStr
 	if field.AsName.L != "" {
 		// Field has alias.
@@ -514,12 +515,12 @@ func (b *planBuilder) buildDistinct(child LogicalPlan, length int) LogicalPlan {
 	b.optFlag = b.optFlag | flagBuildKeyInfo
 	b.optFlag = b.optFlag | flagAggregationOptimize
 	agg := LogicalAggregation{
-		AggFuncs:     make([]expression.AggregationFunction, 0, child.Schema().Len()),
+		AggFuncs:     make([]aggregation.Aggregation, 0, child.Schema().Len()),
 		GroupByItems: expression.Column2Exprs(child.Schema().Clone().Columns[:length]),
 	}.init(b.allocator, b.ctx)
 	agg.collectGroupByColumns()
 	for _, col := range child.Schema().Columns {
-		agg.AggFuncs = append(agg.AggFuncs, expression.NewAggFunction(ast.AggFuncFirstRow, []expression.Expression{col}, false))
+		agg.AggFuncs = append(agg.AggFuncs, aggregation.NewAggFunction(ast.AggFuncFirstRow, []expression.Expression{col}, false))
 	}
 	addChild(agg, child)
 	agg.SetSchema(child.Schema().Clone())
@@ -532,6 +533,9 @@ func joinFieldType(a, b *types.FieldType) *types.FieldType {
 	resultTp.Decimal = mathutil.Max(a.Decimal, b.Decimal)
 	// `Flen - Decimal` is the fraction before '.'
 	resultTp.Flen = mathutil.Max(a.Flen-a.Decimal, b.Flen-b.Decimal) + resultTp.Decimal
+	resultTp.Charset = a.Charset
+	resultTp.Collate = a.Collate
+	expression.SetBinFlagOrBinStr(b, resultTp)
 	return resultTp
 }
 
@@ -612,6 +616,11 @@ func (by *ByItems) String() string {
 		return fmt.Sprintf("%s true", by.Expr)
 	}
 	return by.Expr.String()
+}
+
+// Clone makes a copy of ByItems.
+func (by *ByItems) Clone() *ByItems {
+	return &ByItems{Expr: by.Expr.Clone(), Desc: by.Desc}
 }
 
 func (b *planBuilder) buildSort(p LogicalPlan, byItems []*ast.ByItem, aggMapper map[*ast.AggregateFuncExpr]int) LogicalPlan {
@@ -1337,7 +1346,7 @@ func (b *planBuilder) buildSemiApply(outerPlan, innerPlan LogicalPlan, condition
 	join := b.buildSemiJoin(outerPlan, innerPlan, condition, asScalar, not)
 	ap := &LogicalApply{LogicalJoin: *join}
 	ap.tp = TypeApply
-	ap.id = ap.tp + ap.allocator.allocID()
+	ap.id = ap.allocator.allocID()
 	ap.self = ap
 	ap.children[0].SetParents(ap)
 	ap.children[1].SetParents(ap)
@@ -1394,7 +1403,7 @@ func (b *planBuilder) buildSemiJoin(outerPlan, innerPlan LogicalPlan, onConditio
 		newSchema := outerPlan.Schema().Clone()
 		newSchema.Append(&expression.Column{
 			FromID:      joinPlan.id,
-			ColName:     model.NewCIStr(fmt.Sprintf("%s_aux_0", joinPlan.id)),
+			ColName:     model.NewCIStr(fmt.Sprintf("%d_aux_0", joinPlan.id)),
 			RetType:     types.NewFieldType(mysql.TypeTiny),
 			IsAggOrSubq: true,
 		})
@@ -1450,7 +1459,11 @@ func (b *planBuilder) buildUpdate(update *ast.UpdateStmt) LogicalPlan {
 		return nil
 	}
 	p = np
-	updt := Update{OrderedList: orderedList}.init(b.allocator, b.ctx)
+
+	updt := Update{
+		OrderedList: orderedList,
+		IgnoreErr:   update.IgnoreErr,
+	}.init(b.allocator, b.ctx)
 	addChild(updt, p)
 	updt.SetSchema(p.Schema())
 	return updt

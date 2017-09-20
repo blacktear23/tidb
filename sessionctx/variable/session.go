@@ -14,6 +14,7 @@
 package variable
 
 import (
+	"crypto/tls"
 	"math"
 	"sync"
 	"time"
@@ -127,6 +128,9 @@ type SessionVars struct {
 
 	// ClientCapability is client's capability.
 	ClientCapability uint32
+
+	// TLSConnectionState is the TLS connection state (nil if not using TLS).
+	TLSConnectionState *tls.ConnectionState
 
 	// ConnectionID is the connection id of the current session.
 	ConnectionID uint64
@@ -244,11 +248,6 @@ func NewSessionVars() *SessionVars {
 	}
 }
 
-const (
-	characterSetConnection = "character_set_connection"
-	collationConnection    = "collation_connection"
-)
-
 // GetCharsetInfo gets charset and collation for current context.
 // What character set should the server translate a statement to after receiving it?
 // For this, the server uses the character_set_connection and collation_connection system variables.
@@ -259,8 +258,8 @@ const (
 // have their own collation, which has a higher collation precedence.
 // See https://dev.mysql.com/doc/refman/5.7/en/charset-connection.html
 func (s *SessionVars) GetCharsetInfo() (charset, collation string) {
-	charset = s.Systems[characterSetConnection]
-	collation = s.Systems[collationConnection]
+	charset = s.Systems[CharacterSetConnection]
+	collation = s.Systems[CollationConnection]
 	return
 }
 

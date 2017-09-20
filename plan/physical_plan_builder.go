@@ -16,10 +16,11 @@ package plan
 import (
 	"math"
 
+	log "github.com/Sirupsen/logrus"
 	"github.com/juju/errors"
-	"github.com/ngaut/log"
 	"github.com/pingcap/tidb/context"
 	"github.com/pingcap/tidb/expression"
+	"github.com/pingcap/tidb/expression/aggregation"
 	"github.com/pingcap/tidb/infoschema"
 	"github.com/pingcap/tidb/kv"
 	"github.com/pingcap/tidb/model"
@@ -34,6 +35,7 @@ const (
 	scanFactor         = 2.0
 	descScanFactor     = 5 * scanFactor
 	memoryFactor       = 5.0
+	hashAggMemFactor   = 2.0
 	selectionFactor    = 0.8
 	distinctFactor     = 0.8
 	cpuFactor          = 0.9
@@ -614,9 +616,7 @@ func (p *LogicalJoin) buildSelectionWithConds(leftAsOuter bool) (*Selection, []*
 	if selection.controllerStatus == notController {
 		return nil, nil
 	}
-	for _, cond := range innerConditions {
-		conds = append(conds, cond)
-	}
+	conds = append(conds, innerConditions...)
 	for _, cond := range p.OtherConditions {
 		newCond := expression.ConvertCol2CorCol(cond, corCols, outerSchema)
 		newCond.ResolveIndices(innerChild.Schema())
@@ -1068,7 +1068,7 @@ func (p *LogicalJoin) convert2PhysicalPlan(prop *requiredProperty) (*physicalPla
 // convert2PhysicalPlanStream converts the logical aggregation to the stream aggregation *physicalPlanInfo.
 func (p *LogicalAggregation) convert2PhysicalPlanStream(prop *requiredProperty) (*physicalPlanInfo, error) {
 	for _, aggFunc := range p.AggFuncs {
-		if aggFunc.GetMode() == expression.FinalMode {
+		if aggFunc.GetMode() == aggregation.FinalMode {
 			return &physicalPlanInfo{cost: math.MaxFloat64}, nil
 		}
 	}
