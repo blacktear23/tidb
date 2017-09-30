@@ -16,6 +16,7 @@ package expression
 import (
 	"time"
 
+	"github.com/juju/errors"
 	. "github.com/pingcap/check"
 	"github.com/pingcap/tidb/ast"
 	"github.com/pingcap/tidb/model"
@@ -143,7 +144,7 @@ func (s *testEvaluatorSuite) TestCompare(c *C) {
 	}
 
 	for _, t := range tests {
-		bf, err := funcs[t.funcName].getFunction(s.ctx, primitiveValsToConstants([]interface{}{t.arg0, t.arg1}))
+		bf, err := funcs[t.funcName].getFunction(s.ctx, s.primitiveValsToConstants([]interface{}{t.arg0, t.arg1}))
 		c.Assert(err, IsNil)
 		args := bf.getArgs()
 		c.Assert(args[0].GetType().Tp, Equals, t.tp)
@@ -195,7 +196,7 @@ func (s *testEvaluatorSuite) TestCoalesce(c *C) {
 	}
 
 	for _, t := range cases {
-		f, err := newFunctionForTest(s.ctx, ast.Coalesce, primitiveValsToConstants(t.args)...)
+		f, err := newFunctionForTest(s.ctx, ast.Coalesce, s.primitiveValsToConstants(t.args)...)
 		c.Assert(err, IsNil)
 
 		d, err := f.Eval(nil)
@@ -252,11 +253,97 @@ func (s *testEvaluatorSuite) TestIntervalFunc(c *C) {
 		{types.MakeDatums("9007199254740992", "9007199254740993"), 1},
 	} {
 		fc := funcs[ast.Interval]
-		f, err := fc.getFunction(s.ctx, datumsToConstants(t.args))
+		f, err := fc.getFunction(s.ctx, s.datumsToConstants(t.args))
 		c.Assert(err, IsNil)
 		c.Assert(f.canBeFolded(), IsTrue)
 		v, err := f.eval(nil)
 		c.Assert(err, IsNil)
 		c.Assert(v.GetInt64(), Equals, t.ret)
 	}
+}
+
+func (s *testEvaluatorSuite) TestGreatestLeastFuncs(c *C) {
+	defer testleak.AfterTest(c)()
+
+	sc := s.ctx.GetSessionVars().StmtCtx
+	originIgnoreTruncate := sc.IgnoreTruncate
+	sc.IgnoreTruncate = true
+	defer func() {
+		sc.IgnoreTruncate = originIgnoreTruncate
+	}()
+
+	for _, t := range []struct {
+		args             []interface{}
+		expectedGreatest interface{}
+		expectedLeast    interface{}
+		isNil            bool
+		getErr           bool
+	}{
+		{
+			[]interface{}{1, 2, 3, 4},
+			int64(4), int64(1), false, false,
+		},
+		{
+			[]interface{}{"a", "b", "c"},
+			"c", "a", false, false,
+		},
+		{
+			[]interface{}{"123a", "b", "c", 12},
+			float64(123), float64(0), false, false,
+		},
+		{
+			[]interface{}{tm, "123"},
+			curTimeString, "123", false, false,
+		},
+		{
+			[]interface{}{tm, 123},
+			curTimeInt, int64(123), false, false,
+		},
+		{
+			[]interface{}{duration, "123"},
+			"12:59:59", "123", false, false,
+		},
+		{
+			[]interface{}{"123", nil, "123"},
+			nil, nil, true, false,
+		},
+		{
+			[]interface{}{errors.New("must error"), 123},
+			nil, nil, false, true,
+		},
+	} {
+		f0, err := newFunctionForTest(s.ctx, ast.Greatest, s.primitiveValsToConstants(t.args)...)
+		c.Assert(err, IsNil)
+		d, err := f0.Eval(nil)
+		if t.getErr {
+			c.Assert(err, NotNil)
+		} else {
+			c.Assert(err, IsNil)
+			if t.isNil {
+				c.Assert(d.Kind(), Equals, types.KindNull)
+			} else {
+				c.Assert(d.GetValue(), DeepEquals, t.expectedGreatest)
+			}
+		}
+
+		f1, err := newFunctionForTest(s.ctx, ast.Least, s.primitiveValsToConstants(t.args)...)
+		c.Assert(err, IsNil)
+		d, err = f1.Eval(nil)
+		if t.getErr {
+			c.Assert(err, NotNil)
+		} else {
+			c.Assert(err, IsNil)
+			if t.isNil {
+				c.Assert(d.Kind(), Equals, types.KindNull)
+			} else {
+				c.Assert(d.GetValue(), DeepEquals, t.expectedLeast)
+			}
+		}
+	}
+	f, err := funcs[ast.Greatest].getFunction(s.ctx, []Expression{Zero, One})
+	c.Assert(err, IsNil)
+	c.Assert(f.canBeFolded(), IsTrue)
+	f, err = funcs[ast.Least].getFunction(s.ctx, []Expression{Zero, One})
+	c.Assert(err, IsNil)
+	c.Assert(f.canBeFolded(), IsTrue)
 }

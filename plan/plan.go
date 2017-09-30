@@ -30,7 +30,7 @@ import (
 
 // UseDAGPlanBuilder checks if we use new DAG planner.
 func UseDAGPlanBuilder(ctx context.Context) bool {
-	return ctx.GetClient().IsRequestTypeSupported(kv.ReqTypeDAG, kv.ReqSubTypeBasic) && ctx.GetSessionVars().CBO
+	return ctx.GetClient().IsRequestTypeSupported(kv.ReqTypeDAG, kv.ReqSubTypeBasic)
 }
 
 // Plan is the description of an execution flow.
@@ -126,8 +126,8 @@ type requiredProp struct {
 	hashcode []byte
 }
 
-func (p *requiredProp) equal(prop *requiredProp) bool {
-	if len(p.cols) != len(prop.cols) || p.desc != prop.desc {
+func (p *requiredProp) isPrefix(prop *requiredProp) bool {
+	if len(p.cols) > len(prop.cols) || p.desc != prop.desc {
 		return false
 	}
 	if p.taskTp != prop.taskTp {
@@ -461,7 +461,6 @@ func (p *basePlan) copy() *basePlan {
 }
 
 func (p *basePlan) replaceExprColumns(replace map[string]*expression.Column) {
-	return
 }
 
 // MarshalJSON implements json.Marshaler interface.

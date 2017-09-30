@@ -28,7 +28,7 @@ func (s *testEvaluatorSuite) TestNewValuesFunc(c *C) {
 	res := NewValuesFunc(0, types.NewFieldType(mysql.TypeLonglong), s.ctx)
 	c.Assert(res.FuncName.O, Equals, "values")
 	c.Assert(res.RetType.Tp, Equals, mysql.TypeLonglong)
-	_, ok := res.Function.(*builtinValuesSig)
+	_, ok := res.Function.(*builtinValuesIntSig)
 	c.Assert(ok, IsTrue)
 }
 
@@ -63,4 +63,20 @@ func (s *testEvaluatorSuite) TestConstant(c *C) {
 	res, err := Zero.MarshalJSON()
 	c.Assert(err, IsNil)
 	c.Assert(res, DeepEquals, []byte{0x22, 0x30, 0x22})
+}
+
+func (s *testEvaluatorSuite) TestIsHybridType(c *C) {
+	col := &Column{RetType: types.NewFieldType(mysql.TypeEnum)}
+	c.Assert(IsHybridType(col), IsTrue)
+	col.RetType.Tp = mysql.TypeSet
+	c.Assert(IsHybridType(col), IsTrue)
+	col.RetType.Tp = mysql.TypeBit
+	c.Assert(IsHybridType(col), IsTrue)
+	col.RetType.Tp = mysql.TypeDuration
+	c.Assert(IsHybridType(col), IsFalse)
+
+	con := &Constant{RetType: types.NewFieldType(mysql.TypeVarString), Value: types.NewBinaryLiteralDatum([]byte{byte(0), byte(1)})}
+	c.Assert(IsHybridType(con), IsTrue)
+	con.Value = types.NewIntDatum(1)
+	c.Assert(IsHybridType(con), IsFalse)
 }

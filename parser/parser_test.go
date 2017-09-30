@@ -92,7 +92,7 @@ func (s *testParserSuite) TestSimple(c *C) {
 		"compact", "redundant", "sql_no_cache sql_no_cache", "sql_cache sql_cache", "action", "round",
 		"enable", "disable", "reverse", "space", "privileges", "get_lock", "release_lock", "sleep", "no", "greatest", "least",
 		"binlog", "hex", "unhex", "function", "indexes", "from_unixtime", "processlist", "events", "less", "than", "timediff",
-		"ln", "log", "log2", "log10", "timestampdiff", "pi", "quote", "none", "super", "default", "shared", "exclusive",
+		"ln", "log", "log2", "log10", "timestampdiff", "pi", "quote", "none", "super", "shared", "exclusive",
 		"always", "stats", "stats_meta", "stats_histogram", "stats_buckets", "tidb_version",
 	}
 	for _, kw := range unreservedKws {
@@ -169,6 +169,11 @@ func (s *testParserSuite) TestSimple(c *C) {
 	c.Assert(cs.Cols[0].Options, HasLen, 1)
 	c.Assert(cs.Cols[0].Options[0].Tp, Equals, ast.ColumnOptionPrimaryKey)
 
+	// for issue #4497
+	src = "create table t1(a NVARCHAR(100));"
+	_, err = parser.ParseOneStmt(src, "", "")
+	c.Assert(err, IsNil)
+
 	// for issue 2803
 	src = "use quote;"
 	_, err = parser.ParseOneStmt(src, "", "")
@@ -217,7 +222,7 @@ func (s *testParserSuite) TestDMLStmt(c *C) {
 		{"INSERT INTO foo VALUES (1 || 2)", true},
 		{"INSERT INTO foo VALUES (1 | 2)", true},
 		{"INSERT INTO foo VALUES (false || true)", true},
-		{"INSERT INTO foo VALUES (bar(5678))", false},
+		{"INSERT INTO foo VALUES (bar(5678))", true},
 		// 20
 		{"INSERT INTO foo VALUES ()", true},
 		{"SELECT * FROM t", true},
@@ -246,11 +251,12 @@ func (s *testParserSuite) TestDMLStmt(c *C) {
 
 		// for issue 2402
 		{"INSERT INTO tt VALUES (01000001783);", true},
+		{"INSERT INTO tt VALUES (default);", true},
 
 		{"REPLACE INTO foo VALUES (1 || 2)", true},
 		{"REPLACE INTO foo VALUES (1 | 2)", true},
 		{"REPLACE INTO foo VALUES (false || true)", true},
-		{"REPLACE INTO foo VALUES (bar(5678))", false},
+		{"REPLACE INTO foo VALUES (bar(5678))", true},
 		{"REPLACE INTO foo VALUES ()", true},
 		{"REPLACE INTO foo (a,b) VALUES (42,314)", true},
 		{"REPLACE INTO foo (a,b,) VALUES (42,314)", false},
@@ -545,6 +551,12 @@ func (s *testParserSuite) TestExpression(c *C) {
 		// for date literal
 		{"select date'1989-09-10'", true},
 		{"select date 19890910", false},
+		// for time literal
+		{"select time '00:00:00.111'", true},
+		{"select time 19890910", false},
+		// for timestamp literal
+		{"select timestamp '1989-09-10 11:11:11'", true},
+		{"select timestamp 19890910", false},
 	}
 	s.RunTest(c, table)
 }
@@ -949,7 +961,9 @@ func (s *testParserSuite) TestBuiltin(c *C) {
 		{`SELECT RELEASE_ALL_LOCKS(1);`, true},
 		{`SELECT UUID(1);`, true},
 		{`SELECT UUID_SHORT(1)`, true},
-
+		// interval
+		{`select "2011-11-11 10:10:10.123456" + interval 10 second`, true},
+		{`select "2011-11-11 10:10:10.123456" - interval 10 second`, true},
 		// for date_add
 		{`select date_add("2011-11-11 10:10:10.123456", interval 10 microsecond)`, true},
 		{`select date_add("2011-11-11 10:10:10.123456", interval 10 second)`, true},
@@ -1138,6 +1152,9 @@ func (s *testParserSuite) TestBuiltin(c *C) {
 		{`SELECT '{}'->>'$.a' FROM t`, false},
 		{`SELECT a->3 FROM t`, false},
 		{`SELECT a->>3 FROM t`, false},
+
+		// Test that quoted identifier can be a function name.
+		{"SELECT `uuid`()", true},
 	}
 	s.RunTest(c, table)
 }
@@ -1253,6 +1270,7 @@ func (s *testParserSuite) TestDDL(c *C) {
 		{"create table t (c int) PARTITION BY HASH (c) PARTITIONS 32;", true},
 		{"create table t (c int) PARTITION BY RANGE (Year(VDate)) (PARTITION p1980 VALUES LESS THAN (1980) ENGINE = MyISAM, PARTITION p1990 VALUES LESS THAN (1990) ENGINE = MyISAM, PARTITION pothers VALUES LESS THAN MAXVALUE ENGINE = MyISAM)", true},
 		{"create table t (c int, `create_time` timestamp NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '') PARTITION BY RANGE (UNIX_TIMESTAMP(create_time)) (PARTITION p201610 VALUES LESS THAN(1477929600), PARTITION p201611 VALUES LESS THAN(1480521600),PARTITION p201612 VALUES LESS THAN(1483200000),PARTITION p201701 VALUES LESS THAN(1485878400),PARTITION p201702 VALUES LESS THAN(1488297600),PARTITION p201703 VALUES LESS THAN(1490976000))", true},
+		{"CREATE TABLE `md_product_shop` (`shopCode` varchar(4) DEFAULT NULL COMMENT '地点') ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 /*!50100 PARTITION BY KEY (shopCode) PARTITIONS 19 */;", true},
 
 		// for check clause
 		{"create table t (c1 bool, c2 bool, check (c1 in (0, 1)), check (c2 in (0, 1)))", true},
@@ -1444,6 +1462,9 @@ func (s *testParserSuite) TestDDL(c *C) {
 		{"ALTER TABLE t ADD UNIQUE ()", false},
 		{"ALTER TABLE t ADD UNIQUE INDEX ()", false},
 		{"ALTER TABLE t ADD UNIQUE KEY ()", false},
+
+		// for issue 4538
+		{"create table a (process double)", true},
 	}
 	s.RunTest(c, table)
 }
@@ -1710,6 +1731,24 @@ func (s *testParserSuite) TestPriority(c *C) {
 	c.Assert(sel.SelectStmtOpts.Priority, Equals, mysql.HighPriority)
 }
 
+func (s *testParserSuite) TestSQLNoCache(c *C) {
+	defer testleak.AfterTest(c)()
+	table := []testCase{
+		{`select SQL_NO_CACHE * from t`, false},
+		{`select SQL_CACHE * from t`, true},
+		{`select * from t`, true},
+	}
+
+	parser := New()
+	for _, tt := range table {
+		stmt, err := parser.Parse(tt.src, "", "")
+		c.Assert(err, IsNil)
+
+		sel := stmt[0].(*ast.SelectStmt)
+		c.Assert(sel.SelectStmtOpts.SQLCache, Equals, tt.ok)
+	}
+}
+
 func (s *testParserSuite) TestEscape(c *C) {
 	defer testleak.AfterTest(c)()
 	table := []testCase{
@@ -1762,6 +1801,7 @@ func (s *testParserSuite) TestExplain(c *C) {
 		{"explain replace into foo values (1 || 2)", true},
 		{"explain update t set id = id + 1 order by id desc;", true},
 		{"explain select c1 from t1 union (select c2 from t2) limit 1, 1", true},
+		{`explain format = "row" select c1 from t1 union (select c2 from t2) limit 1, 1`, true},
 	}
 	s.RunTest(c, table)
 }

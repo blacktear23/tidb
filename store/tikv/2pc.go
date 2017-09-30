@@ -29,6 +29,7 @@ import (
 	"github.com/pingcap/tidb/store/tikv/tikvrpc"
 	"github.com/pingcap/tidb/tablecodec"
 	"github.com/pingcap/tidb/terror"
+	"github.com/pingcap/tidb/util/goroutine_pool"
 	"github.com/pingcap/tipb/go-binlog"
 	goctx "golang.org/x/net/context"
 )
@@ -40,6 +41,8 @@ const (
 	actionCommit   twoPhaseCommitAction = 2
 	actionCleanup  twoPhaseCommitAction = 3
 )
+
+var twoPhaseCommitGP = gp.New(3 * time.Minute)
 
 func (ca twoPhaseCommitAction) String() string {
 	switch ca {
@@ -74,6 +77,7 @@ type twoPhaseCommitter struct {
 		undetermined bool
 	}
 	priority pb.CommandPri
+	syncLog  bool
 }
 
 // newTwoPhaseCommitter creates a twoPhaseCommitter.
@@ -148,6 +152,7 @@ func newTwoPhaseCommitter(txn *tikvTxn) (*twoPhaseCommitter, error) {
 		mutations: mutations,
 		lockTTL:   txnLockTTL(txn.startTime, size),
 		priority:  getTxnPriority(txn),
+		syncLog:   getTxnSyncLog(txn),
 	}, nil
 }
 
@@ -218,28 +223,16 @@ func (c *twoPhaseCommitter) doActionOnKeys(bo *Backoffer, action twoPhaseCommitA
 	}
 	if action == actionCommit {
 		// Commit secondary batches in background goroutine to reduce latency.
-		go func() {
-			reserveStack(false)
+		twoPhaseCommitGP.Go(func() {
 			e := c.doActionOnBatches(bo, action, batches)
 			if e != nil {
 				log.Debugf("2PC async doActionOnBatches %s err: %v", action, e)
 			}
-		}()
+		})
 	} else {
 		err = c.doActionOnBatches(bo, action, batches)
 	}
 	return errors.Trace(err)
-}
-
-// reserveStack reserves 4KB memory on the stack to avoid runtime.morestack, call it after new a goroutine if necessary.
-func reserveStack(dummy bool) {
-	var buf [8 << 10]byte
-	// avoid compiler optimize the buf out.
-	if dummy {
-		for i := range buf {
-			buf[i] = byte(i)
-		}
-	}
 }
 
 // doActionOnBatches does action to batches in parallel.
@@ -273,9 +266,10 @@ func (c *twoPhaseCommitter) doActionOnBatches(bo *Backoffer, action twoPhaseComm
 
 	// Concurrently do the work for each batch.
 	ch := make(chan error, len(batches))
-	for _, batch := range batches {
-		go func(batch batchKeys) {
-			reserveStack(false)
+	for _, batch1 := range batches {
+
+		batch := batch1
+		twoPhaseCommitGP.Go(func() {
 			if action == actionCommit {
 				// Because the secondary batches of the commit actions are implemented to be
 				// committed asynchronously in background goroutines, we should not
@@ -291,7 +285,7 @@ func (c *twoPhaseCommitter) doActionOnBatches(bo *Backoffer, action twoPhaseComm
 				defer singleBatchCancel()
 				ch <- singleBatchActionFunc(singleBatchBackoffer, batch)
 			}
-		}(batch)
+		})
 	}
 	var err error
 	for i := 0; i < len(batches); i++ {
@@ -329,13 +323,16 @@ func (c *twoPhaseCommitter) prewriteSingleBatch(bo *Backoffer, batch batchKeys) 
 	}
 
 	req := &tikvrpc.Request{
-		Type:     tikvrpc.CmdPrewrite,
-		Priority: c.priority,
+		Type: tikvrpc.CmdPrewrite,
 		Prewrite: &pb.PrewriteRequest{
 			Mutations:    mutations,
 			PrimaryLock:  c.primary(),
 			StartVersion: c.startTS,
 			LockTtl:      c.lockTTL,
+		},
+		Context: pb.Context{
+			Priority: c.priority,
+			SyncLog:  c.syncLog,
 		},
 	}
 	for {
@@ -404,6 +401,13 @@ func getTxnPriority(txn *tikvTxn) pb.CommandPri {
 	return pb.CommandPri_Normal
 }
 
+func getTxnSyncLog(txn *tikvTxn) bool {
+	if sync := txn.us.GetOption(kv.SyncLog); sync != nil {
+		return sync.(bool)
+	}
+	return false
+}
+
 func kvPriorityToCommandPri(pri int) pb.CommandPri {
 	switch pri {
 	case kv.PriorityLow:
@@ -416,14 +420,18 @@ func kvPriorityToCommandPri(pri int) pb.CommandPri {
 
 func (c *twoPhaseCommitter) commitSingleBatch(bo *Backoffer, batch batchKeys) error {
 	req := &tikvrpc.Request{
-		Type:     tikvrpc.CmdCommit,
-		Priority: c.priority,
+		Type: tikvrpc.CmdCommit,
 		Commit: &pb.CommitRequest{
 			StartVersion:  c.startTS,
 			Keys:          batch.keys,
 			CommitVersion: c.commitTS,
 		},
+		Context: pb.Context{
+			Priority: c.priority,
+			SyncLog:  c.syncLog,
+		},
 	}
+	req.Context.Priority = c.priority
 
 	// If we fail to receive response for the request that commits primary key, it will be undetermined whether this
 	// transaction has been successfully committed.
@@ -487,6 +495,10 @@ func (c *twoPhaseCommitter) cleanupSingleBatch(bo *Backoffer, batch batchKeys) e
 			Keys:         batch.keys,
 			StartVersion: c.startTS,
 		},
+		Context: pb.Context{
+			Priority: c.priority,
+			SyncLog:  c.syncLog,
+		},
 	}
 	resp, err := c.store.SendReq(bo, req, batch.region, readTimeoutShort)
 	if err != nil {
@@ -539,15 +551,14 @@ func (c *twoPhaseCommitter) execute() error {
 		undetermined := c.mu.undetermined
 		c.mu.RUnlock()
 		if !committed && !undetermined {
-			go func() {
-				reserveStack(false)
+			twoPhaseCommitGP.Go(func() {
 				err := c.cleanupKeys(NewBackoffer(cleanupMaxBackoff, goctx.Background()), writtenKeys)
 				if err != nil {
 					log.Infof("2PC cleanup err: %v, tid: %d", err, c.startTS)
 				} else {
 					log.Infof("2PC clean up done, tid: %d", c.startTS)
 				}
-			}()
+			})
 		}
 	}()
 

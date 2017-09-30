@@ -21,7 +21,6 @@ import (
 	"github.com/pingcap/tidb/ast"
 	"github.com/pingcap/tidb/context"
 	"github.com/pingcap/tidb/domain"
-	"github.com/pingcap/tidb/expression"
 	"github.com/pingcap/tidb/infoschema"
 	"github.com/pingcap/tidb/kv"
 	"github.com/pingcap/tidb/model"
@@ -64,6 +63,9 @@ func newStringType() types.FieldType {
 }
 
 func MockTable() *model.TableInfo {
+	// column: a, b, c, d, e, c_str, d_str, e_str, f, g
+	// PK: a
+	// indeices: c_d_e, e, f, g, f_g, c_d_e_str, c_d_e_str_prefix
 	indices := []*model.IndexInfo{
 		{
 			Name: model.NewCIStr("c_d_e"),
@@ -120,8 +122,7 @@ func MockTable() *model.TableInfo {
 					Offset: 9,
 				},
 			},
-			State:  model.StatePublic,
-			Unique: true,
+			State: model.StatePublic,
 		},
 		{
 			Name: model.NewCIStr("f_g"),
@@ -277,7 +278,7 @@ func MockResolve(node ast.Node) (infoschema.InfoSchema, error) {
 	if err != nil {
 		return nil, err
 	}
-	return is, expression.InferType(ctx.GetSessionVars().StmtCtx, node)
+	return is, nil
 }
 
 func supportExpr(exprType tipb.ExprType) bool {
@@ -677,10 +678,6 @@ func (s *testPlanSuite) TestPlanBuilder(c *C) {
 			sql:  "select substr(\"abc\", 1)",
 			plan: "Dual->Projection",
 		},
-		{
-			sql:  "analyze table t, t",
-			plan: "*plan.Analyze",
-		},
 	}
 	for _, ca := range tests {
 		comment := Commentf("for %s", ca.sql)
@@ -856,6 +853,7 @@ func (s *testPlanSuite) TestAggPushDown(c *C) {
 			colMapper: make(map[*ast.ColumnNameExpr]int),
 			is:        is,
 		}
+		builder.ctx.GetSessionVars().AllowAggPushDown = true
 		p := builder.build(stmt)
 		c.Assert(builder.err, IsNil)
 		lp := p.(LogicalPlan)
@@ -1117,12 +1115,33 @@ func (s *testPlanSuite) TestValidate(c *C) {
 		},
 		{
 			sql: "insert into t set a = 1, b = a + 1",
-			err: ErrUnknownColumn,
+			err: nil,
 		},
 		{
 			sql: "insert into t set a = 1, b = values(a) + 1",
 			err: nil,
 		},
+		// TODO: Fix Error Code.
+		//{
+		//	sql: "select a, b, c from t order by 0",
+		//	err: ErrUnknownColumn,
+		//},
+		//{
+		//	sql: "select a, b, c from t order by 4",
+		//	err: ErrUnknownColumn,
+		//},
+		{
+			sql: "select a as c1, b as c1 from t order by c1",
+			err: ErrAmbiguous,
+		},
+		{
+			sql: "(select a as b, b from t) union (select a, b from t) order by b",
+			err: ErrAmbiguous,
+		},
+		//{
+		//	sql: "(select a as b, b from t) union (select a, b from t) order by a",
+		//	err: ErrUnknownColumn,
+		//},
 	}
 	for _, tt := range tests {
 		sql := tt.sql
@@ -1130,7 +1149,7 @@ func (s *testPlanSuite) TestValidate(c *C) {
 		stmt, err := s.ParseOneStmt(sql, "", "")
 		c.Assert(err, IsNil, comment)
 		is, err := MockResolve(stmt)
-		c.Assert(err, IsNil)
+		c.Assert(err, IsNil, comment)
 		builder := &planBuilder{
 			allocator: new(idAllocator),
 			ctx:       mockContext(),
@@ -1194,18 +1213,18 @@ func (s *testPlanSuite) TestUniqueKeyInfo(c *C) {
 		{
 			sql: "select f, g, sum(a) from t",
 			ans: map[int][][]string{
-				1: {{"test.t.f"}, {"test.t.g"}, {"test.t.f", "test.t.g"}, {"test.t.a"}},
-				2: {{"test.t.f"}, {"test.t.g"}, {"test.t.f", "test.t.g"}},
-				3: {{"f"}, {"g"}, {"f", "g"}},
+				1: {{"test.t.f"}, {"test.t.f", "test.t.g"}, {"test.t.a"}},
+				2: {{"test.t.f"}, {"test.t.f", "test.t.g"}},
+				3: {{"f"}, {"f", "g"}},
 			},
 		},
 		{
 			sql: "select * from t t1 join t t2 on t1.a = t2.e",
 			ans: map[int][][]string{
-				1: {{"t1.f"}, {"t1.g"}, {"t1.f", "t1.g"}, {"t1.a"}},
-				2: {{"t2.f"}, {"t2.g"}, {"t2.f", "t2.g"}, {"t2.a"}},
-				3: {{"t2.f"}, {"t2.g"}, {"t2.f", "t2.g"}, {"t2.a"}},
-				4: {{"t2.f"}, {"t2.g"}, {"t2.f", "t2.g"}, {"t2.a"}},
+				1: {{"t1.f"}, {"t1.f", "t1.g"}, {"t1.a"}},
+				2: {{"t2.f"}, {"t2.f", "t2.g"}, {"t2.a"}},
+				3: {{"t2.f"}, {"t2.f", "t2.g"}, {"t2.a"}},
+				4: {{"t2.f"}, {"t2.f", "t2.g"}, {"t2.a"}},
 			},
 		},
 		{
@@ -1221,10 +1240,10 @@ func (s *testPlanSuite) TestUniqueKeyInfo(c *C) {
 		{
 			sql: "select * from t t1 left join t t2 on t1.a = t2.a",
 			ans: map[int][][]string{
-				1: {{"t1.f"}, {"t1.g"}, {"t1.f", "t1.g"}, {"t1.a"}},
-				2: {{"t2.f"}, {"t2.g"}, {"t2.f", "t2.g"}, {"t2.a"}},
-				3: {{"t1.f"}, {"t1.g"}, {"t1.f", "t1.g"}, {"t1.a"}},
-				4: {{"t1.f"}, {"t1.g"}, {"t1.f", "t1.g"}, {"t1.a"}},
+				1: {{"t1.f"}, {"t1.f", "t1.g"}, {"t1.a"}},
+				2: {{"t2.f"}, {"t2.f", "t2.g"}, {"t2.a"}},
+				3: {{"t1.f"}, {"t1.f", "t1.g"}, {"t1.a"}},
+				4: {{"t1.f"}, {"t1.f", "t1.g"}, {"t1.a"}},
 			},
 		},
 	}
@@ -1290,6 +1309,7 @@ func (s *testPlanSuite) TestAggPrune(c *C) {
 			ctx:       mockContext(),
 			is:        is,
 		}
+		builder.ctx.GetSessionVars().AllowAggPushDown = true
 		p := builder.build(stmt).(LogicalPlan)
 		c.Assert(builder.err, IsNil)
 		p, err = logicalOptimize(flagPredicatePushDown|flagPrunColumns|flagBuildKeyInfo|flagAggregationOptimize, p.(LogicalPlan), builder.ctx, builder.allocator)

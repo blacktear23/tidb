@@ -106,10 +106,6 @@ func (s *testCompareSuite) TestCompare(c *C) {
 		{[]byte("123"), 1234, -1},
 		{[]byte{}, nil, 1},
 
-		{[]interface{}{1, 2, 3}, []interface{}{1, 2, 3}, 0},
-		{[]interface{}{1, 3, 3}, []interface{}{1, 2, 3}, 1},
-		{[]interface{}{1, 2, 3}, []interface{}{2, 2, 3}, -1},
-
 		{NewBinaryLiteralFromUint(1, -1), 1, 0},
 		{NewBinaryLiteralFromUint(0x4D7953514C, -1), "MySQL", 0},
 		{NewBinaryLiteralFromUint(0, -1), uint64(10), -1},
@@ -158,7 +154,7 @@ func compareForTest(a, b interface{}) (int, error) {
 	sc.IgnoreTruncate = true
 	aDatum := NewDatum(a)
 	bDatum := NewDatum(b)
-	return aDatum.CompareDatum(sc, bDatum)
+	return aDatum.CompareDatum(sc, &bDatum)
 }
 
 func (s *testCompareSuite) TestCompareDatum(c *C) {
@@ -181,11 +177,11 @@ func (s *testCompareSuite) TestCompareDatum(c *C) {
 	sc.IgnoreTruncate = true
 	for i, t := range cmpTbl {
 		comment := Commentf("%d %v %v", i, t.lhs, t.rhs)
-		ret, err := t.lhs.CompareDatum(sc, t.rhs)
+		ret, err := t.lhs.CompareDatum(sc, &t.rhs)
 		c.Assert(err, IsNil)
 		c.Assert(ret, Equals, t.ret, comment)
 
-		ret, err = t.rhs.CompareDatum(sc, t.lhs)
+		ret, err = t.rhs.CompareDatum(sc, &t.lhs)
 		c.Assert(err, IsNil)
 		c.Assert(ret, Equals, -t.ret, comment)
 	}

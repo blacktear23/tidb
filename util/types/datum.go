@@ -45,12 +45,11 @@ const (
 	KindMysqlBit      byte = 11 // Used for BIT table column values.
 	KindMysqlSet      byte = 12
 	KindMysqlTime     byte = 13
-	KindRow           byte = 14
-	KindInterface     byte = 15
-	KindMinNotNull    byte = 16
-	KindMaxValue      byte = 17
-	KindRaw           byte = 18
-	KindMysqlJSON     byte = 19
+	KindInterface     byte = 14
+	KindMinNotNull    byte = 15
+	KindMaxValue      byte = 16
+	KindRaw           byte = 17
+	KindMysqlJSON     byte = 18
 )
 
 // Datum is a data box holds different kind of data.
@@ -191,17 +190,6 @@ func (d *Datum) GetInterface() interface{} {
 func (d *Datum) SetInterface(x interface{}) {
 	d.k = KindInterface
 	d.x = x
-}
-
-// GetRow gets row value.
-func (d *Datum) GetRow() []Datum {
-	return d.x.([]Datum)
-}
-
-// SetRow sets row value.
-func (d *Datum) SetRow(ds []Datum) {
-	d.k = KindRow
-	d.x = ds
 }
 
 // SetNull sets datum to nil.
@@ -391,11 +379,6 @@ func (d *Datum) SetValue(val interface{}) {
 		d.SetMysqlJSON(x)
 	case Time:
 		d.SetMysqlTime(x)
-	case []Datum:
-		d.SetRow(x)
-	case []interface{}:
-		ds := MakeDatums(x...)
-		d.SetRow(ds)
 	default:
 		d.SetInterface(x)
 	}
@@ -403,9 +386,9 @@ func (d *Datum) SetValue(val interface{}) {
 
 // CompareDatum compares datum to another datum.
 // TODO: return error properly.
-func (d *Datum) CompareDatum(sc *variable.StatementContext, ad Datum) (int, error) {
+func (d *Datum) CompareDatum(sc *variable.StatementContext, ad *Datum) (int, error) {
 	if d.k == KindMysqlJSON && ad.k != KindMysqlJSON {
-		cmp, err := ad.CompareDatum(sc, *d)
+		cmp, err := ad.CompareDatum(sc, d)
 		return cmp * -1, errors.Trace(err)
 	}
 	switch ad.k {
@@ -450,8 +433,6 @@ func (d *Datum) CompareDatum(sc *variable.StatementContext, ad Datum) (int, erro
 		return d.compareMysqlJSON(sc, ad.GetMysqlJSON())
 	case KindMysqlTime:
 		return d.compareMysqlTime(sc, ad.GetMysqlTime())
-	case KindRow:
-		return d.compareRow(sc, ad.GetRow())
 	default:
 		return 0, nil
 	}
@@ -643,25 +624,6 @@ func (d *Datum) compareMysqlTime(sc *variable.StatementContext, time Time) (int,
 	}
 }
 
-func (d *Datum) compareRow(sc *variable.StatementContext, row []Datum) (int, error) {
-	var dRow []Datum
-	if d.k == KindRow {
-		dRow = d.GetRow()
-	} else {
-		dRow = []Datum{*d}
-	}
-	for i := 0; i < len(row) && i < len(dRow); i++ {
-		cmp, err := dRow[i].CompareDatum(sc, row[i])
-		if err != nil {
-			return 0, err
-		}
-		if cmp != 0 {
-			return cmp, nil
-		}
-	}
-	return CompareInt64(int64(len(dRow)), int64(len(row))), nil
-}
-
 // ConvertTo converts a datum to the target field type.
 func (d *Datum) ConvertTo(sc *variable.StatementContext, target *FieldType) (Datum, error) {
 	if d.k == KindNull {
@@ -734,6 +696,8 @@ func (d *Datum) convertToFloat(sc *variable.StatementContext, target *FieldType)
 	case KindBinaryLiteral, KindMysqlBit:
 		val, err1 := d.GetBinaryLiteral().ToInt()
 		f, err = float64(val), err1
+	case KindMysqlJSON:
+		f, err = ConvertJSONToFloat(sc, d.GetMysqlJSON())
 	default:
 		return invalidConv(d, target.Tp)
 	}
@@ -895,6 +859,10 @@ func (d *Datum) convertToUint(sc *variable.StatementContext, target *FieldType) 
 		val, err = ConvertFloatToUint(sc, d.GetMysqlSet().ToNumber(), upperBound, tp)
 	case KindBinaryLiteral, KindMysqlBit:
 		val, err = d.GetBinaryLiteral().ToInt()
+	case KindMysqlJSON:
+		var i64 int64
+		i64, err = ConvertJSONToInt(sc, d.GetMysqlJSON(), true)
+		val = uint64(i64)
 	default:
 		return invalidConv(d, target.Tp)
 	}
@@ -1087,6 +1055,9 @@ func (d *Datum) convertToMysqlDecimal(sc *variable.StatementContext, target *Fie
 func ProduceDecWithSpecifiedTp(dec *MyDecimal, tp *FieldType, sc *variable.StatementContext) (_ *MyDecimal, err error) {
 	flen, decimal := tp.Flen, tp.Decimal
 	if flen != UnspecifiedLength && decimal != UnspecifiedLength {
+		if flen < decimal {
+			return nil, ErrMBiggerThanD.GenByArgs("")
+		}
 		prec, frac := dec.PrecisionAndFrac()
 		if !dec.IsZero() && prec-frac > flen-decimal {
 			dec = NewMaxOrMinDec(dec.IsNegative(), flen, decimal)
@@ -1409,7 +1380,7 @@ func (d *Datum) toSignedInteger(sc *variable.StatementContext, tp byte) (int64, 
 		fval := d.GetMysqlSet().ToNumber()
 		return ConvertFloatToInt(sc, fval, lowerBound, upperBound, tp)
 	case KindMysqlJSON:
-		return ConvertJSONToInt(sc, d.GetMysqlJSON(), true)
+		return ConvertJSONToInt(sc, d.GetMysqlJSON(), false)
 	case KindBinaryLiteral, KindMysqlBit:
 		val, err := d.GetBinaryLiteral().ToInt()
 		return int64(val), err
@@ -1731,7 +1702,7 @@ func EqualDatums(sc *variable.StatementContext, a []Datum, b []Datum) (bool, err
 		return false, nil
 	}
 	for i, ai := range a {
-		v, err := ai.CompareDatum(sc, b[i])
+		v, err := ai.CompareDatum(sc, &b[i])
 		if err != nil {
 			return false, errors.Trace(err)
 		}
@@ -1760,7 +1731,7 @@ func (ds *datumsSorter) Len() int {
 }
 
 func (ds *datumsSorter) Less(i, j int) bool {
-	cmp, err := ds.datums[i].CompareDatum(ds.sc, ds.datums[j])
+	cmp, err := ds.datums[i].CompareDatum(ds.sc, &ds.datums[j])
 	if err != nil {
 		ds.err = errors.Trace(err)
 		return true

@@ -20,6 +20,7 @@ import (
 	"github.com/juju/errors"
 	"github.com/pingcap/tidb/context"
 	"github.com/pingcap/tidb/expression"
+	"github.com/pingcap/tidb/expression/aggregation"
 	"github.com/pingcap/tidb/infoschema"
 	"github.com/pingcap/tidb/kv"
 	"github.com/pingcap/tidb/model"
@@ -34,6 +35,7 @@ const (
 	scanFactor         = 2.0
 	descScanFactor     = 5 * scanFactor
 	memoryFactor       = 5.0
+	hashAggMemFactor   = 2.0
 	selectionFactor    = 0.8
 	distinctFactor     = 0.8
 	cpuFactor          = 0.9
@@ -63,8 +65,7 @@ func (p *DataSource) convert2TableScan(prop *requiredProperty) (*physicalPlanInf
 		ts.readOnly = true
 	}
 
-	var resultPlan PhysicalPlan
-	resultPlan = ts
+	var resultPlan PhysicalPlan = ts
 	table := p.tableInfo
 	sc := p.ctx.GetSessionVars().StmtCtx
 	ts.Ranges = []types.IntColumnRange{{LowVal: math.MinInt64, HighVal: math.MaxInt64}}
@@ -132,8 +133,7 @@ func (p *DataSource) convert2IndexScan(prop *requiredProperty, index *model.Inde
 		is.readOnly = true
 	}
 
-	var resultPlan PhysicalPlan
-	resultPlan = is
+	var resultPlan PhysicalPlan = is
 	statsTbl := p.statisticTable
 	rowCount := float64(statsTbl.Count)
 	sc := p.ctx.GetSessionVars().StmtCtx
@@ -239,8 +239,7 @@ func (p *DataSource) convert2PhysicalPlan(prop *requiredProperty) (*physicalPlan
 		memTable.Ranges = ranger.FullIntRange()
 		info = &physicalPlanInfo{p: memTable}
 		info = enforceProperty(prop, info)
-		p.storePlanInfo(prop, info)
-		return info, nil
+		return info, errors.Trace(p.storePlanInfo(prop, info))
 	}
 	indices, includeTableScan := availableIndices(p.indexHints, p.tableInfo)
 	if includeTableScan {
@@ -284,8 +283,7 @@ func (p *DataSource) tryToConvert2DummyScan(prop *requiredProperty) (*physicalPl
 				dual := TableDual{}.init(p.allocator, p.ctx)
 				dual.SetSchema(p.schema)
 				info := &physicalPlanInfo{p: dual}
-				p.storePlanInfo(prop, info)
-				return info, nil
+				return info, errors.Trace(p.storePlanInfo(prop, info))
 			}
 		}
 	}
@@ -345,7 +343,7 @@ func sortCost(cnt float64) float64 {
 		// If cnt is 0, the log(cnt) will be NAN.
 		return 0.0
 	}
-	return cnt*math.Log2(float64(cnt))*cpuFactor + memoryFactor*float64(cnt)
+	return cnt*math.Log2(cnt)*cpuFactor + memoryFactor*cnt
 }
 
 // removeLimit removes the limit from prop.
@@ -396,8 +394,7 @@ func (p *Limit) convert2PhysicalPlan(prop *requiredProperty) (*physicalPlanInfo,
 		return nil, errors.Trace(err)
 	}
 	info = enforceProperty(prop, info)
-	p.storePlanInfo(prop, info)
-	return info, nil
+	return info, errors.Trace(p.storePlanInfo(prop, info))
 }
 
 // convert2PhysicalPlanSemi converts the semi join to *physicalPlanInfo.
@@ -608,12 +605,6 @@ func (p *LogicalJoin) buildSelectionWithConds(leftAsOuter bool) (*Selection, []*
 		conds = append(conds, newCond)
 	}
 	selection.Conditions = conds
-	// Currently only eq conds will be considered when we call checkScanController, and innerConds from the below sel may contain correlated column,
-	// which will have side effect when we do check. So we do check before append other conditions into selection.
-	selection.controllerStatus = selection.checkScanController()
-	if selection.controllerStatus == notController {
-		return nil, nil
-	}
 	conds = append(conds, innerConditions...)
 	for _, cond := range p.OtherConditions {
 		newCond := expression.ConvertCol2CorCol(cond, corCols, outerSchema)
@@ -798,8 +789,7 @@ func compareTypeForOrder(lhs *types.FieldType, rhs *types.FieldType) bool {
 	if lhs.Tp != rhs.Tp {
 		return false
 	}
-	if lhs.ToClass() == types.ClassString &&
-		(lhs.Charset != rhs.Charset || lhs.Collate != rhs.Collate) {
+	if lhs.EvalType().IsStringKind() && (lhs.Charset != rhs.Charset || lhs.Collate != rhs.Collate) {
 		return false
 	}
 	return true
@@ -947,12 +937,7 @@ func (p *LogicalJoin) convert2PhysicalMergeJoinOnCost(prop *requiredProperty) (*
 }
 
 func (p *LogicalJoin) hasEqualConds() bool {
-	// rule out non-equal join
-	if len(p.EqualConditions) == 0 {
-		return false
-	}
-
-	return true
+	return len(p.EqualConditions) != 0
 }
 
 // convert2PhysicalPlan implements the LogicalPlan convert2PhysicalPlan interface.
@@ -1059,14 +1044,13 @@ func (p *LogicalJoin) convert2PhysicalPlan(prop *requiredProperty) (*physicalPla
 			info = lInfo
 		}
 	}
-	p.storePlanInfo(prop, info)
-	return info, nil
+	return info, errors.Trace(p.storePlanInfo(prop, info))
 }
 
 // convert2PhysicalPlanStream converts the logical aggregation to the stream aggregation *physicalPlanInfo.
 func (p *LogicalAggregation) convert2PhysicalPlanStream(prop *requiredProperty) (*physicalPlanInfo, error) {
 	for _, aggFunc := range p.AggFuncs {
-		if aggFunc.GetMode() == expression.FinalMode {
+		if aggFunc.GetMode() == aggregation.FinalMode {
 			return &physicalPlanInfo{cost: math.MaxFloat64}, nil
 		}
 	}
@@ -1190,12 +1174,14 @@ func (p *LogicalAggregation) convert2PhysicalPlan(prop *requiredProperty) (*phys
 		}
 	}
 	streamInfo, err := p.convert2PhysicalPlanStream(removeLimit(prop))
+	if err != nil {
+		return nil, errors.Trace(err)
+	}
 	if planInfo == nil || streamInfo.cost < planInfo.cost {
 		planInfo = streamInfo
 	}
 	planInfo = enforceProperty(limitProperty(limit), planInfo)
-	err = p.storePlanInfo(prop, planInfo)
-	return planInfo, errors.Trace(err)
+	return planInfo, errors.Trace(p.storePlanInfo(prop, planInfo))
 }
 
 // convert2PhysicalPlan implements the LogicalPlan convert2PhysicalPlan interface.
@@ -1227,8 +1213,7 @@ func (p *Union) convert2PhysicalPlan(prop *requiredProperty) (*physicalPlanInfo,
 	}
 	info = p.matchProperty(prop, childInfos...)
 	info = enforceProperty(prop, info)
-	p.storePlanInfo(prop, info)
-	return info, nil
+	return info, errors.Trace(p.storePlanInfo(prop, info))
 }
 
 // makeScanController will try to build a selection that controls the below scan's filter condition,
@@ -1322,8 +1307,7 @@ func (p *Selection) convert2PhysicalPlan(prop *requiredProperty) (*physicalPlanI
 	if p.controllerStatus != notController {
 		info = p.makeScanController()
 		info = enforceProperty(prop, info)
-		p.storePlanInfo(prop, info)
-		return info, nil
+		return info, errors.Trace(p.storePlanInfo(prop, info))
 	}
 	// Firstly, we try to push order.
 	info, err = p.convert2PhysicalPlanPushOrder(prop)
@@ -1341,8 +1325,7 @@ func (p *Selection) convert2PhysicalPlan(prop *requiredProperty) (*physicalPlanI
 		}
 	}
 	info = p.matchProperty(prop, info)
-	p.storePlanInfo(prop, info)
-	return info, nil
+	return info, errors.Trace(p.storePlanInfo(prop, info))
 }
 
 func (p *Selection) appendSelToInfo(info *physicalPlanInfo) *physicalPlanInfo {
@@ -1452,8 +1435,7 @@ loop:
 		return nil, errors.Trace(err)
 	}
 	info = addPlanToResponse(p, info)
-	p.storePlanInfo(prop, info)
-	return info, nil
+	return info, errors.Trace(p.storePlanInfo(prop, info))
 }
 
 func matchProp(ctx context.Context, target, new *requiredProperty) bool {
@@ -1529,8 +1511,7 @@ func (p *Sort) convert2PhysicalPlan(prop *requiredProperty) (*physicalPlanInfo, 
 	if !matchProp(p.ctx, prop, selfProp) {
 		sortedPlanInfo.cost = math.MaxFloat64
 	}
-	p.storePlanInfo(prop, sortedPlanInfo)
-	return sortedPlanInfo, nil
+	return sortedPlanInfo, errors.Trace(p.storePlanInfo(prop, sortedPlanInfo))
 }
 
 // convert2PhysicalPlan implements the LogicalPlan convert2PhysicalPlan interface.
@@ -1564,8 +1545,7 @@ func (p *LogicalApply) convert2PhysicalPlan(prop *requiredProperty) (*physicalPl
 		info.p = nil
 	}
 	info = enforceProperty(prop, info)
-	p.storePlanInfo(prop, info)
-	return info, nil
+	return info, errors.Trace(p.storePlanInfo(prop, info))
 }
 
 // addCachePlan will add a Cache plan above the plan whose father's IsCorrelated() is true but its own IsCorrelated() is false.

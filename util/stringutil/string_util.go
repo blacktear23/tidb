@@ -161,7 +161,12 @@ func CompilePattern(pattern string, escape byte) (patChars, patTypes []byte) {
 				}
 			}
 		case '_':
-			lastAny = false
+			if lastAny {
+				patChars[patLen-1], patTypes[patLen-1] = c, patOne
+				patChars[patLen], patTypes[patLen] = '%', patAny
+				patLen++
+				continue
+			}
 			tp = patOne
 		case '%':
 			if lastAny {
@@ -177,12 +182,6 @@ func CompilePattern(pattern string, escape byte) (patChars, patTypes []byte) {
 		patTypes[patLen] = tp
 		patLen++
 	}
-	for i := 0; i < patLen-1; i++ {
-		if (patTypes[i] == patAny) && (patTypes[i+1] == patOne) {
-			patTypes[i] = patOne
-			patTypes[i+1] = patAny
-		}
-	}
 	patChars = patChars[:patLen]
 	patTypes = patTypes[:patLen]
 	return
@@ -190,14 +189,19 @@ func CompilePattern(pattern string, escape byte) (patChars, patTypes []byte) {
 
 const caseDiff = 'a' - 'A'
 
+// NOTE: Currently tikv's like function is case sensitive, so we keep its behavior here.
 func matchByteCI(a, b byte) bool {
-	if a == b {
-		return true
-	}
-	if a >= 'a' && a <= 'z' && a-caseDiff == b {
-		return true
-	}
-	return a >= 'A' && a <= 'Z' && a+caseDiff == b
+	return a == b
+	// We may reuse below code block when like function go back to case insensitive.
+	/*
+		if a == b {
+			return true
+		}
+		if a >= 'a' && a <= 'z' && a-caseDiff == b {
+			return true
+		}
+		return a >= 'A' && a <= 'Z' && a+caseDiff == b
+	*/
 }
 
 // DoMatch matches the string with patChars and patTypes.
