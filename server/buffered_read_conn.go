@@ -20,18 +20,38 @@ import (
 
 const defaultReaderSize = 16 * 1024
 
-// bufferedReadConn is a net.Conn compatible structure that reads from bufio.Reader.
-type bufferedReadConn struct {
+// bufferedReadConn is a net.Conn compatible interface that support peek and discard operation.
+type bufferedReadConn interface {
+	net.Conn
+	Peek(n int) ([]byte, error)
+	Discard(n int) (int, error)
+	Buffered() int
+}
+
+// bufReadConn is a implements for bufferedReadConn
+type bufReadConn struct {
 	net.Conn
 	rb *bufio.Reader
 }
 
-func (conn bufferedReadConn) Read(b []byte) (n int, err error) {
+func (conn bufReadConn) Read(b []byte) (n int, err error) {
 	return conn.rb.Read(b)
 }
 
-func newBufferedReadConn(conn net.Conn) *bufferedReadConn {
-	return &bufferedReadConn{
+func (conn bufReadConn) Peek(n int) ([]byte, error) {
+	return conn.rb.Peek(n)
+}
+
+func (conn bufReadConn) Discard(n int) (int, error) {
+	return conn.rb.Discard(n)
+}
+
+func (conn bufReadConn) Buffered() int {
+	return conn.rb.Buffered()
+}
+
+func newBufferedReadConn(conn net.Conn) bufferedReadConn {
+	return &bufReadConn{
 		Conn: conn,
 		rb:   bufio.NewReaderSize(conn, defaultReaderSize),
 	}

@@ -46,18 +46,18 @@ const defaultWriterSize = 16 * 1024
 
 // packetIO is a helper to read and write data in packet format.
 type packetIO struct {
-	bufReadConn *bufferedReadConn
+	bufReadConn bufferedReadConn
 	bufWriter   *bufio.Writer
 	sequence    uint8
 }
 
-func newPacketIO(bufReadConn *bufferedReadConn) *packetIO {
+func newPacketIO(bufReadConn bufferedReadConn) *packetIO {
 	p := &packetIO{sequence: 0}
 	p.setBufferedReadConn(bufReadConn)
 	return p
 }
 
-func (p *packetIO) setBufferedReadConn(bufReadConn *bufferedReadConn) {
+func (p *packetIO) setBufferedReadConn(bufReadConn bufferedReadConn) {
 	p.bufReadConn = bufReadConn
 	p.bufWriter = bufio.NewWriterSize(bufReadConn, defaultWriterSize)
 }
