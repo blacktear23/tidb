@@ -586,16 +586,14 @@ func (b *executorBuilder) buildSemiJoin(v *plan.PhysicalHashSemiJoin) *HashSemiJ
 }
 
 func (b *executorBuilder) buildAggregation(v *plan.PhysicalAggregation) Executor {
-	/*
-		if v.AggType == plan.StreamedAgg {
-			return &StreamAggExec{
-				baseExecutor: newBaseExecutor(v.Schema(), b.ctx, b.build(v.Children()[0])),
-				StmtCtx:      b.ctx.GetSessionVars().StmtCtx,
-				AggFuncs:     v.AggFuncs,
-				GroupByItems: v.GroupByItems,
-			}
+	if v.AggType == plan.StreamedAgg {
+		return &StreamAggExec{
+			baseExecutor: newBaseExecutor(v.Schema(), b.ctx, b.build(v.Children()[0])),
+			StmtCtx:      b.ctx.GetSessionVars().StmtCtx,
+			AggFuncs:     v.AggFuncs,
+			GroupByItems: v.GroupByItems,
 		}
-	*/
+	}
 	return &HashAggExec{
 		baseExecutor: newBaseExecutor(v.Schema(), b.ctx, b.build(v.Children()[0])),
 		sc:           b.ctx.GetSessionVars().StmtCtx,
