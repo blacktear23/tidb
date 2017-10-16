@@ -30,6 +30,9 @@ import (
 	"github.com/pingcap/tidb/util/types"
 )
 
+// EnableStreamAggs is a switch to enable StreamAggs
+var EnableStreamAggs = false
+
 // wholeTaskTypes records all possible kinds of task that a plan can return. For Agg, TopN and Limit, we will try to get
 // these tasks one by one.
 var wholeTaskTypes = [...]taskType{copSingleReadTaskType, copDoubleReadTaskType, rootTaskType}
@@ -1101,6 +1104,9 @@ func (p *TopN) getChildrenPossibleProps(prop *requiredProp) [][]*requiredProp {
 }
 
 func (p *LogicalAggregation) getStreamAggs() []PhysicalPlan {
+	if !EnableStreamAggs {
+		return nil
+	}
 	if len(p.possibleProperties) == 0 {
 		return nil
 	}
