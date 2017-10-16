@@ -1129,9 +1129,10 @@ func (p *LogicalAggregation) getStreamAggs() []PhysicalPlan {
 			GroupByItems: p.GroupByItems,
 			AggFuncs:     p.AggFuncs,
 			HasGby:       len(p.GroupByItems) > 0,
-			AggType:      StreamedAgg,
-			propKeys:     cols,
-			inputCount:   p.inputCount,
+			/* AggType:      StreamedAgg, */
+			AggType:    CompleteAgg,
+			propKeys:   cols,
+			inputCount: p.inputCount,
 		}.init(p.allocator, p.ctx)
 		agg.SetSchema(p.schema.Clone())
 		agg.profile = p.profile
