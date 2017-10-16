@@ -419,13 +419,13 @@ func (b *executorBuilder) buildUnionScanExec(v *plan.PhysicalUnionScan) Executor
 		us.dirty = getDirtyDB(b.ctx).getDirtyTable(x.table.Meta().ID)
 		us.conditions = v.Conditions
 		us.columns = x.Columns
-		us.buildAndSortAddedRows(x.table)
+		b.err = us.buildAndSortAddedRows(x.table)
 	case *TableReaderExecutor:
 		us.desc = x.desc
 		us.dirty = getDirtyDB(b.ctx).getDirtyTable(x.table.Meta().ID)
 		us.conditions = v.Conditions
 		us.columns = x.columns
-		us.buildAndSortAddedRows(x.table)
+		b.err = us.buildAndSortAddedRows(x.table)
 	case *XSelectIndexExec:
 		us.desc = x.desc
 		for _, ic := range x.index.Columns {
@@ -439,7 +439,7 @@ func (b *executorBuilder) buildUnionScanExec(v *plan.PhysicalUnionScan) Executor
 		us.dirty = getDirtyDB(b.ctx).getDirtyTable(x.table.Meta().ID)
 		us.conditions = v.Conditions
 		us.columns = x.columns
-		us.buildAndSortAddedRows(x.table)
+		b.err = us.buildAndSortAddedRows(x.table)
 	case *IndexReaderExecutor:
 		us.desc = x.desc
 		for _, ic := range x.index.Columns {
@@ -453,7 +453,7 @@ func (b *executorBuilder) buildUnionScanExec(v *plan.PhysicalUnionScan) Executor
 		us.dirty = getDirtyDB(b.ctx).getDirtyTable(x.table.Meta().ID)
 		us.conditions = v.Conditions
 		us.columns = x.columns
-		us.buildAndSortAddedRows(x.table)
+		b.err = us.buildAndSortAddedRows(x.table)
 	case *IndexLookUpExecutor:
 		us.desc = x.desc
 		for _, ic := range x.index.Columns {
@@ -467,10 +467,13 @@ func (b *executorBuilder) buildUnionScanExec(v *plan.PhysicalUnionScan) Executor
 		us.dirty = getDirtyDB(b.ctx).getDirtyTable(x.table.Meta().ID)
 		us.conditions = v.Conditions
 		us.columns = x.columns
-		us.buildAndSortAddedRows(x.table)
+		b.err = us.buildAndSortAddedRows(x.table)
 	default:
 		// The mem table will not be written by sql directly, so we can omit the union scan to avoid err reporting.
 		return src
+	}
+	if b.err != nil {
+		return nil
 	}
 	return us
 }
@@ -1204,7 +1207,7 @@ func (b *executorBuilder) buildIndexLookUpReader(v *plan.PhysicalIndexLookUpRead
 		tableReaderSchema *expression.Schema
 	)
 	table, _ := b.is.TableByID(is.Table.ID)
-	len := v.Schema().Len()
+	length := v.Schema().Len()
 	if v.NeedColHandle {
 		handleCol = v.Schema().TblID2Handle[is.Table.ID][0]
 	} else if !is.OutOfOrder {
@@ -1216,11 +1219,16 @@ func (b *executorBuilder) buildIndexLookUpReader(v *plan.PhysicalIndexLookUpRead
 			RetType: types.NewFieldType(mysql.TypeLonglong),
 		}
 		tableReaderSchema.Append(handleCol)
-		len = tableReaderSchema.Len()
+		length = tableReaderSchema.Len()
 	}
 
-	for i := 0; i < len; i++ {
+	for i := 0; i < length; i++ {
 		tableReq.OutputOffsets = append(tableReq.OutputOffsets, uint32(i))
+	}
+
+	ranges := make([]*types.IndexRange, 0, len(is.Ranges))
+	for _, rangeInPlan := range is.Ranges {
+		ranges = append(ranges, rangeInPlan.Clone())
 	}
 
 	e := &IndexLookUpExecutor{
@@ -1232,7 +1240,7 @@ func (b *executorBuilder) buildIndexLookUpReader(v *plan.PhysicalIndexLookUpRead
 		index:             is.Index,
 		keepOrder:         !is.OutOfOrder,
 		desc:              is.Desc,
-		ranges:            is.Ranges,
+		ranges:            ranges,
 		tableRequest:      tableReq,
 		columns:           is.Columns,
 		handleCol:         handleCol,

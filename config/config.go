@@ -31,11 +31,13 @@ type Config struct {
 	RunDDL       bool   `toml:"run-ddl" json:"run-ddl"`
 	SplitTable   bool   `toml:"split-table" json:"split-table"`
 
-	Log           Log           `toml:"log" json:"log"`
-	Security      Security      `toml:"security" json:"security"`
-	Status        Status        `toml:"status" json:"status"`
-	Performance   Performance   `toml:"performance" json:"performance"`
-	XProtocol     XProtocol     `toml:"xprotocol" json:"xprotocol"`
+	Log         Log         `toml:"log" json:"log"`
+	Security    Security    `toml:"security" json:"security"`
+	Status      Status      `toml:"status" json:"status"`
+	Performance Performance `toml:"performance" json:"performance"`
+	XProtocol   XProtocol   `toml:"xprotocol" json:"xprotocol"`
+	PlanCache   PlanCache   `toml:"plan-cache" json:"plan-cache"`
+
 	ProxyProtocol ProxyProtocol `toml:"proxy-protocol" toml:"proxy-protocol"`
 }
 
@@ -99,6 +101,13 @@ type XProtocol struct {
 	XSocket string `toml:"xsocket" json:"xsocket"`
 }
 
+// PlanCache is the PlanCache section of the config.
+type PlanCache struct {
+	Enabled  bool  `toml:"plan-cache-enabled" json:"plan-cache-enabled"`
+	Capacity int64 `toml:"plan-cache-capacity" json:"plan-cache-capacity"`
+	Shards   int64 `toml:"plan-cache-shards" json:"plan-cache-shards"`
+}
+
 var defaultConf = Config{
 	Host:   "0.0.0.0",
 	Port:   4000,
@@ -126,7 +135,7 @@ var defaultConf = Config{
 		JoinConcurrency: 5,
 		CrossJoin:       true,
 		StatsLease:      "3s",
-		RunAutoAnalyze:  false,
+		RunAutoAnalyze:  true,
 	},
 	XProtocol: XProtocol{
 		XHost: "0.0.0.0",
@@ -135,6 +144,11 @@ var defaultConf = Config{
 	ProxyProtocol: ProxyProtocol{
 		Networks:      "",
 		HeaderTimeout: 5,
+	},
+	PlanCache: PlanCache{
+		Enabled:  false,
+		Capacity: 2560,
+		Shards:   256,
 	},
 }
 

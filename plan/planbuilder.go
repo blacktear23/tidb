@@ -204,7 +204,7 @@ func (b *planBuilder) buildDo(v *ast.DoStmt) Plan {
 	}
 	dual.SetSchema(expression.NewSchema())
 	p := Projection{Exprs: exprs}.init(b.allocator, b.ctx)
-	addChild(p, dual)
+	setParentAndChildren(p, dual)
 	p.self = p
 	p.SetSchema(expression.NewSchema())
 	return p
@@ -340,7 +340,7 @@ func findIndexByName(indices []*model.IndexInfo, name model.CIStr) *model.IndexI
 
 func (b *planBuilder) buildSelectLock(src Plan, lock ast.SelectLockType) *SelectLock {
 	selectLock := SelectLock{Lock: lock}.init(b.allocator, b.ctx)
-	addChild(selectLock, src)
+	setParentAndChildren(selectLock, src)
 	selectLock.SetSchema(src.Schema())
 	return selectLock
 }
@@ -490,7 +490,7 @@ func buildColumn(tableName, name string, tp byte, size int) *expression.Column {
 		Collate: cl,
 		Tp:      tp,
 		Flen:    size,
-		Flag:    uint(flag),
+		Flag:    flag,
 	}
 	return &expression.Column{
 		ColName: model.NewCIStr(name),
@@ -569,7 +569,7 @@ func (b *planBuilder) buildShow(show *ast.ShowStmt) Plan {
 	}
 	if len(conditions) != 0 {
 		sel := Selection{Conditions: conditions}.init(b.allocator, b.ctx)
-		addChild(sel, p)
+		setParentAndChildren(sel, p)
 		sel.SetSchema(p.Schema())
 		resultPlan = sel
 	}
@@ -865,7 +865,7 @@ func (b *planBuilder) buildInsert(insert *ast.InsertStmt) Plan {
 				return nil
 			}
 		}
-		addChild(insertPlan, selectPlan)
+		setParentAndChildren(insertPlan, selectPlan)
 	}
 
 	// Calculate generated columns.
@@ -1016,7 +1016,11 @@ func (b *planBuilder) buildExplain(explain *ast.ExplainStmt) Plan {
 		schema.Append(buildColumn("", "Json", mysql.TypeString, mysql.MaxBlobWidth))
 		schema.Append(buildColumn("", "ParentID", mysql.TypeString, mysql.MaxBlobWidth))
 		p.SetSchema(schema)
-		p.prepareExplainInfo(p.StmtPlan, nil)
+		err := p.prepareExplainInfo(p.StmtPlan, nil)
+		if err != nil {
+			b.err = errors.Trace(err)
+			return nil
+		}
 	}
 	return p
 }
