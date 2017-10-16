@@ -31,7 +31,7 @@ import (
 )
 
 // EnableStreamAggs is a switch to enable StreamAggs
-var EnableStreamAggs = false
+var EnableStreamAggs = true
 
 // wholeTaskTypes records all possible kinds of task that a plan can return. For Agg, TopN and Limit, we will try to get
 // these tasks one by one.
@@ -1129,10 +1129,9 @@ func (p *LogicalAggregation) getStreamAggs() []PhysicalPlan {
 			GroupByItems: p.GroupByItems,
 			AggFuncs:     p.AggFuncs,
 			HasGby:       len(p.GroupByItems) > 0,
-			/* AggType:      StreamedAgg, */
-			AggType:    CompleteAgg,
-			propKeys:   cols,
-			inputCount: p.inputCount,
+			AggType:      StreamedAgg,
+			propKeys:     cols,
+			inputCount:   p.inputCount,
 		}.init(p.allocator, p.ctx)
 		agg.SetSchema(p.schema.Clone())
 		agg.profile = p.profile
