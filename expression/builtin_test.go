@@ -22,12 +22,12 @@ import (
 	"github.com/pingcap/tidb/context"
 	"github.com/pingcap/tidb/model"
 	"github.com/pingcap/tidb/mysql"
+	"github.com/pingcap/tidb/types"
 	"github.com/pingcap/tidb/util/charset"
 	"github.com/pingcap/tidb/util/testleak"
-	"github.com/pingcap/tidb/util/types"
 )
 
-func evalBuiltinFunc(f builtinFunc, row []types.Datum) (d types.Datum, err error) {
+func evalBuiltinFunc(f builtinFunc, row types.Row) (d types.Datum, err error) {
 	var (
 		res    interface{}
 		isNull bool

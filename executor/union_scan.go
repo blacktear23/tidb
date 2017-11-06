@@ -21,7 +21,7 @@ import (
 	"github.com/pingcap/tidb/expression"
 	"github.com/pingcap/tidb/model"
 	"github.com/pingcap/tidb/table"
-	"github.com/pingcap/tidb/util/types"
+	"github.com/pingcap/tidb/types"
 )
 
 // dirtyDB stores uncommitted write operations for a transaction.
@@ -251,7 +251,7 @@ func (us *UnionScanExec) compare(a, b Row) (int, error) {
 func (us *UnionScanExec) buildAndSortAddedRows(t table.Table) error {
 	us.addedRows = make([]Row, 0, len(us.dirty.addedRows))
 	for h, data := range us.dirty.addedRows {
-		newData := make([]types.Datum, 0, us.schema.Len())
+		newData := make(types.DatumRow, 0, us.schema.Len())
 		for _, col := range us.columns {
 			if col.ID == model.ExtraHandleID {
 				newData = append(newData, types.NewIntDatum(h))

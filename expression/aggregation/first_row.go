@@ -19,7 +19,7 @@ import (
 	"github.com/pingcap/tidb/context"
 	"github.com/pingcap/tidb/expression"
 	"github.com/pingcap/tidb/sessionctx/variable"
-	"github.com/pingcap/tidb/util/types"
+	"github.com/pingcap/tidb/types"
 )
 
 type firstRowFunction struct {
@@ -41,7 +41,7 @@ func (ff *firstRowFunction) GetType() *types.FieldType {
 }
 
 // Update implements Aggregation interface.
-func (ff *firstRowFunction) Update(ctx *AggEvaluateContext, sc *variable.StatementContext, row []types.Datum) error {
+func (ff *firstRowFunction) Update(ctx *AggEvaluateContext, sc *variable.StatementContext, row types.Row) error {
 	if ctx.GotFirstRow {
 		return nil
 	}

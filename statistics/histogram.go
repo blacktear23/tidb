@@ -14,6 +14,7 @@
 package statistics
 
 import (
+	"bytes"
 	"fmt"
 	"math"
 	"sort"
@@ -25,9 +26,9 @@ import (
 	"github.com/pingcap/tidb/mysql"
 	"github.com/pingcap/tidb/sessionctx/variable"
 	"github.com/pingcap/tidb/terror"
+	"github.com/pingcap/tidb/types"
 	"github.com/pingcap/tidb/util/codec"
 	"github.com/pingcap/tidb/util/sqlexec"
-	"github.com/pingcap/tidb/util/types"
 	"github.com/pingcap/tipb/go-tipb"
 )
 
@@ -158,6 +159,18 @@ func histogramFromStorage(ctx context.Context, tableID int64, colID int64, tp *t
 		hg.Buckets[i].Count += hg.Buckets[i-1].Count
 	}
 	return hg, nil
+}
+
+func columnCountFromStorage(ctx context.Context, tableID, colID int64) (int64, error) {
+	selSQL := fmt.Sprintf("select sum(count) from mysql.stats_buckets where table_id = %d and is_index = %d and hist_id = %d", tableID, 0, colID)
+	rows, _, err := ctx.(sqlexec.RestrictedSQLExecutor).ExecRestrictedSQL(ctx, selSQL)
+	if err != nil {
+		return 0, errors.Trace(err)
+	}
+	if rows[0].Data[0].IsNull() {
+		return 0, nil
+	}
+	return rows[0].Data[0].GetMysqlDecimal().ToInt()
 }
 
 func (hg *Histogram) toString(isIndex bool) string {
@@ -443,7 +456,8 @@ func MergeHistograms(sc *variable.StatementContext, lh *Histogram, rh *Histogram
 // Column represents a column histogram.
 type Column struct {
 	Histogram
-	Info *model.ColumnInfo
+	Count int64
+	Info  *model.ColumnInfo
 }
 
 func (c *Column) String() string {
@@ -551,12 +565,22 @@ func (idx *Index) getRowCount(sc *variable.StatementContext, indexRanges []*type
 		if err != nil {
 			return 0, errors.Trace(err)
 		}
-		if indexRange.LowExclude {
-			lb = append(lb, 0)
-		}
 		rb, err := codec.EncodeKey(nil, indexRange.HighVal...)
 		if err != nil {
 			return 0, errors.Trace(err)
+		}
+		if bytes.Equal(lb, rb) {
+			if !indexRange.LowExclude && !indexRange.HighExclude {
+				rowCount, err1 := idx.equalRowCount(sc, types.NewBytesDatum(lb))
+				if err1 != nil {
+					return 0, errors.Trace(err1)
+				}
+				totalCount += rowCount
+			}
+			continue
+		}
+		if indexRange.LowExclude {
+			lb = append(lb, 0)
 		}
 		if !indexRange.HighExclude {
 			rb = append(rb, 0)

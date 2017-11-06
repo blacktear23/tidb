@@ -26,20 +26,22 @@ import (
 
 	log "github.com/Sirupsen/logrus"
 	"github.com/juju/errors"
-	"github.com/pingcap/pd/pkg/logutil"
+	"github.com/opentracing/opentracing-go"
 	"github.com/pingcap/tidb"
 	"github.com/pingcap/tidb/config"
 	"github.com/pingcap/tidb/ddl"
 	"github.com/pingcap/tidb/domain"
 	"github.com/pingcap/tidb/kv"
 	"github.com/pingcap/tidb/plan"
-	"github.com/pingcap/tidb/plan/cache"
 	"github.com/pingcap/tidb/privilege/privileges"
 	"github.com/pingcap/tidb/server"
 	"github.com/pingcap/tidb/sessionctx/binloginfo"
-	"github.com/pingcap/tidb/store/localstore/boltdb"
 	"github.com/pingcap/tidb/store/tikv"
+	"github.com/pingcap/tidb/store/tikv/gcworker"
 	"github.com/pingcap/tidb/terror"
+	"github.com/pingcap/tidb/util"
+	"github.com/pingcap/tidb/util/kvcache"
+	"github.com/pingcap/tidb/util/logutil"
 	"github.com/pingcap/tidb/util/printer"
 	"github.com/pingcap/tidb/util/systimemon"
 	"github.com/pingcap/tidb/x-server"
@@ -51,22 +53,24 @@ import (
 
 // Flag Names
 const (
-	nmVersion                    = "V"
-	nmConfig                     = "config"
-	nmStore                      = "store"
-	nmStorePath                  = "path"
-	nmHost                       = "host"
-	nmPort                       = "P"
-	nmSocket                     = "socket"
-	nmBinlogSocket               = "binlog-socket"
-	nmRunDDL                     = "run-ddl"
-	nmLogLevel                   = "L"
-	nmLogFile                    = "log-file"
-	nmReportStatus               = "report-status"
-	nmStatusPort                 = "status"
-	nmMetricsAddr                = "metrics-addr"
-	nmMetricsInterval            = "metrics-interval"
-	nmDdlLease                   = "lease"
+	nmVersion         = "V"
+	nmConfig          = "config"
+	nmStore           = "store"
+	nmStorePath       = "path"
+	nmHost            = "host"
+	nmPort            = "P"
+	nmSocket          = "socket"
+	nmBinlogSocket    = "binlog-socket"
+	nmRunDDL          = "run-ddl"
+	nmLogLevel        = "L"
+	nmLogFile         = "log-file"
+	nmLogSlowQuery    = "log-slow-query"
+	nmReportStatus    = "report-status"
+	nmStatusPort      = "status"
+	nmMetricsAddr     = "metrics-addr"
+	nmMetricsInterval = "metrics-interval"
+	nmDdlLease        = "lease"
+
 	nmProxyProtocolNetworks      = "proxy-protocol-networks"
 	nmProxyProtocolHeaderTimeout = "proxy-protocol-header-timeout"
 )
@@ -86,8 +90,9 @@ var (
 	ddlLease     = flag.String(nmDdlLease, "10s", "schema lease duration, very dangerous to change only if you know what you do")
 
 	// Log
-	logLevel = flag.String(nmLogLevel, "info", "log level: info, debug, warn, error, fatal")
-	logFile  = flag.String(nmLogFile, "", "log file path")
+	logLevel     = flag.String(nmLogLevel, "info", "log level: info, debug, warn, error, fatal")
+	logFile      = flag.String(nmLogFile, "", "log file path")
+	logSlowQuery = flag.String(nmLogSlowQuery, "", "slow query file path")
 
 	// Status
 	reportStatus    = flagBoolean(nmReportStatus, true, "If enable status report HTTP service.")
@@ -132,6 +137,7 @@ func main() {
 	validateConfig()
 	setGlobalVars()
 	setupLog()
+	setupTracing() // Should before createServer and after setup config.
 	printInfo()
 	setupBinlogClient()
 	createStoreAndDomain()
@@ -144,10 +150,9 @@ func main() {
 }
 
 func registerStores() {
-	err := tidb.RegisterLocalStore("boltdb", boltdb.Driver{})
+	err := tidb.RegisterStore("tikv", tikv.Driver{})
 	terror.MustNil(err)
-	err = tidb.RegisterStore("tikv", tikv.Driver{})
-	terror.MustNil(err)
+	tikv.NewGCHandlerFunc = gcworker.NewGCWorker
 	err = tidb.RegisterStore("mocktikv", tikv.MockDriver{})
 	terror.MustNil(err)
 }
@@ -169,9 +174,9 @@ func setupBinlogClient() {
 	dialerOpt := grpc.WithDialer(func(addr string, timeout time.Duration) (net.Conn, error) {
 		return net.DialTimeout("unix", addr, timeout)
 	})
-	clientCon, err := grpc.Dial(cfg.BinlogSocket, dialerOpt, grpc.WithInsecure())
+	clientConn, err := tidb.DialPumpClientWithRetry(cfg.BinlogSocket, util.DefaultMaxRetries, dialerOpt)
 	terror.MustNil(err)
-	binloginfo.SetPumpClient(binlog.NewPumpClient(clientCon))
+	binloginfo.SetPumpClient(binlog.NewPumpClient(clientConn))
 	log.Infof("created binlog client at %s", cfg.BinlogSocket)
 }
 
@@ -288,6 +293,9 @@ func overrideConfig() {
 	if actualFlags[nmLogFile] {
 		cfg.Log.File.Filename = *logFile
 	}
+	if actualFlags[nmLogSlowQuery] {
+		cfg.Log.SlowQueryFile = *logSlowQuery
+	}
 
 	// Status
 	if actualFlags[nmReportStatus] {
@@ -332,13 +340,20 @@ func setGlobalVars() {
 	plan.JoinConcurrency = cfg.Performance.JoinConcurrency
 	plan.AllowCartesianProduct = cfg.Performance.CrossJoin
 	privileges.SkipWithGrant = cfg.Security.SkipGrantTable
+
 	tikv.CoprocessorParallelLevel = *copParallelLevel
 	log.Infof("Coprocessor Parallel Level: %d", *copParallelLevel)
-	cache.PlanCacheEnabled = cfg.PlanCache.Enabled
-	if cache.PlanCacheEnabled {
-		cache.PlanCacheCapacity = cfg.PlanCache.Capacity
-		cache.PlanCacheShards = cfg.PlanCache.Shards
-		cache.GlobalPlanCache = cache.NewShardedLRUCache(cache.PlanCacheCapacity, cache.PlanCacheShards)
+
+	plan.PlanCacheEnabled = cfg.PlanCache.Enabled
+	if plan.PlanCacheEnabled {
+		plan.PlanCacheCapacity = cfg.PlanCache.Capacity
+		plan.PlanCacheShards = cfg.PlanCache.Shards
+		plan.GlobalPlanCache = kvcache.NewShardedLRUCache(plan.PlanCacheCapacity, plan.PlanCacheShards)
+	}
+
+	plan.PreparedPlanCacheEnabled = cfg.PreparedPlanCache.Enabled
+	if plan.PreparedPlanCacheEnabled {
+		plan.PreparedPlanCacheCapacity = cfg.PreparedPlanCache.Capacity
 	}
 }
 
@@ -396,6 +411,15 @@ func setupMetrics() {
 	})
 
 	pushMetric(cfg.Status.MetricsAddr, time.Duration(cfg.Status.MetricsInterval)*time.Second)
+}
+
+func setupTracing() {
+	tracingCfg := cfg.OpenTracing.ToTracingConfig()
+	tracer, _, err := tracingCfg.New("TiDB")
+	if err != nil {
+		log.Fatal("cannot initialize Jaeger Tracer", err)
+	}
+	opentracing.SetGlobalTracer(tracer)
 }
 
 func runServer() {

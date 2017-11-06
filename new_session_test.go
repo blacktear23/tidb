@@ -36,11 +36,11 @@ import (
 	"github.com/pingcap/tidb/store/tikv/mock-tikv"
 	"github.com/pingcap/tidb/table/tables"
 	"github.com/pingcap/tidb/terror"
+	"github.com/pingcap/tidb/types"
 	"github.com/pingcap/tidb/util/auth"
 	"github.com/pingcap/tidb/util/sqlexec"
 	"github.com/pingcap/tidb/util/testkit"
 	"github.com/pingcap/tidb/util/testleak"
-	"github.com/pingcap/tidb/util/types"
 )
 
 var _ = Suite(&testSessionSuite{})
@@ -268,7 +268,7 @@ func (s *testSessionSuite) TestGlobalVarAccessor(c *C) {
 	v, err = se.GetGlobalSysVar(varName)
 	c.Assert(err, IsNil)
 	c.Assert(v, Equals, varValue1)
-	c.Assert(tk.Se.CommitTxn(), IsNil)
+	c.Assert(tk.Se.CommitTxn(tk.Se.GoCtx()), IsNil)
 
 	tk1 := testkit.NewTestKitWithInit(c, s.store)
 	se1 := tk1.Se.(variable.GlobalVarAccessor)
@@ -280,7 +280,7 @@ func (s *testSessionSuite) TestGlobalVarAccessor(c *C) {
 	v, err = se1.GetGlobalSysVar(varName)
 	c.Assert(err, IsNil)
 	c.Assert(v, Equals, varValue2)
-	c.Assert(tk1.Se.CommitTxn(), IsNil)
+	c.Assert(tk1.Se.CommitTxn(tk.Se.GoCtx()), IsNil)
 
 	// Make sure the change is visible to any client that accesses that global variable.
 	v, err = se.GetGlobalSysVar(varName)
@@ -299,7 +299,7 @@ func (s *testSessionSuite) TestRetryResetStmtCtx(c *C) {
 	tk1 := testkit.NewTestKitWithInit(c, s.store)
 	tk1.MustExec("update retrytxn set b = b + 1 where a = 1")
 
-	err := tk.Se.CommitTxn()
+	err := tk.Se.CommitTxn(tk.Se.GoCtx())
 	c.Assert(err, IsNil)
 	c.Assert(tk.Se.AffectedRows(), Equals, uint64(1))
 }

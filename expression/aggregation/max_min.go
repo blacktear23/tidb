@@ -19,7 +19,7 @@ import (
 	"github.com/pingcap/tidb/context"
 	"github.com/pingcap/tidb/expression"
 	"github.com/pingcap/tidb/sessionctx/variable"
-	"github.com/pingcap/tidb/util/types"
+	"github.com/pingcap/tidb/types"
 )
 
 type maxMinFunction struct {
@@ -66,7 +66,7 @@ func (mmf *maxMinFunction) GetPartialResult(ctx *AggEvaluateContext) []types.Dat
 }
 
 // Update implements Aggregation interface.
-func (mmf *maxMinFunction) Update(ctx *AggEvaluateContext, sc *variable.StatementContext, row []types.Datum) error {
+func (mmf *maxMinFunction) Update(ctx *AggEvaluateContext, sc *variable.StatementContext, row types.Row) error {
 	if len(mmf.Args) != 1 {
 		return errors.New("Wrong number of args for AggFuncMaxMin")
 	}

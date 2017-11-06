@@ -34,7 +34,7 @@ import (
 	"github.com/pingcap/tidb/parser/opcode"
 	"github.com/pingcap/tidb/util/auth"
 	"github.com/pingcap/tidb/util/charset"
-	"github.com/pingcap/tidb/util/types"
+	"github.com/pingcap/tidb/types"
 )
 
 %}
@@ -200,6 +200,7 @@ import (
 	smallIntType		"SMALLINT"
 	sqlCalcFoundRows	"SQL_CALC_FOUND_ROWS"
 	starting		"STARTING"
+	straightJoin		"STRAIGHT_JOIN"
 	tableKwd		"TABLE"
 	stored			"STORED"
 	terminated		"TERMINATED"
@@ -216,6 +217,7 @@ import (
 	unlock			"UNLOCK"
 	unsigned		"UNSIGNED"
 	update			"UPDATE"
+	usage			"USAGE"
 	use			"USE"
 	using			"USING"
 	utcDate 		"UTC_DATE"
@@ -252,6 +254,7 @@ import (
 	byteType	"BYTE"
 	charsetKwd	"CHARSET"
 	checksum	"CHECKSUM"
+	client		"CLIENT"
 	coalesce	"COALESCE"
 	collation	"COLLATION"
 	columns		"COLUMNS"
@@ -306,6 +309,10 @@ import (
 	modify		"MODIFY"
 	month		"MONTH"
 	maxRows		"MAX_ROWS"
+	maxConnectionsPerHour	"MAX_CONNECTIONS_PER_HOUR"
+	maxQueriesPerHour	"MAX_QUERIES_PER_HOUR"
+	maxUpdatesPerHour	"MAX_UPDATES_PER_HOUR"
+	maxUserConnections	"MAX_USER_CONNECTIONS"
 	minRows		"MIN_ROWS"
 	names		"NAMES"
 	national	"NATIONAL"
@@ -326,6 +333,7 @@ import (
 	quick		"QUICK"
 	redundant	"REDUNDANT"
 	repeatable	"REPEATABLE"
+	replication	"REPLICATION"
 	reverse		"REVERSE"
 	rollback	"ROLLBACK"
 	row 		"ROW"
@@ -337,6 +345,7 @@ import (
 	share		"SHARE"
 	shared		"SHARED"
 	signed		"SIGNED"
+	slave		"SLAVE"
 	snapshot	"SNAPSHOT"
 	sqlCache	"SQL_CACHE"
 	sqlNoCache	"SQL_NO_CACHE"
@@ -388,6 +397,7 @@ import (
 
 	/* The following tokens belong to TiDBKeyword. */
 	admin		"ADMIN"
+	cancel		"CANCEL"
 	ddl		"DDL"
 	jobs		"JOBS"
 	stats		"STATS"
@@ -491,6 +501,7 @@ import (
 	UseStmt				"USE statement"
 
 %type   <item>
+	AlterTableOptionListOpt		"alter table option list opt"
 	AlterTableSpec			"Alter table specification"
 	AlterTableSpecList		"Alter table specification list"
 	AnyOrAll			"Any or All for subquery"
@@ -518,6 +529,7 @@ import (
 	ConstraintElem			"table constraint element"
 	ConstraintKeywordOpt		"Constraint Keyword or empty"
 	CreateIndexStmtUnique		"CREATE INDEX optional UNIQUE clause"
+	CreateTableOptionListOpt	"create table option list opt"
 	DatabaseOption			"CREATE Database specification"
 	DatabaseOptionList		"CREATE Database specification list"
 	DatabaseOptionListOpt		"CREATE Database specification list opt"
@@ -637,7 +649,6 @@ import (
 	TableNameListOpt		"Table name list opt"
 	TableOption			"create table option"
 	TableOptionList			"create table option list"
-	TableOptionListOpt		"create table option list opt"
 	TableRef 			"table reference"
 	TableRefs 			"table references"
 	TableToTable 			"rename table to table"
@@ -693,7 +704,8 @@ import (
 	OptBinary		"Optional BINARY"
 	OptCharset		"Optional Character setting"
 	OptCollate		"Optional Collate setting"
-	NUM			"numbers"
+	NUM			"A number"
+	NumList			"Some numbers"
 	LengthNum		"Field length num(uint64)"
 	HintTableList		"Table list in optimizer hint"
 	TableOptimizerHintOpt	"Table level optimizer hint"
@@ -759,7 +771,7 @@ import (
 %precedence lowerThanKey
 %precedence key
 
-%left   join inner cross left right full natural
+%left   join straightJoin inner cross left right full natural
 /* A dummy token to force the priority of TableRef production in a join. */
 %left   tableRefPriority
 %precedence lowerThanOn
@@ -786,6 +798,7 @@ import (
 %precedence escape
 %precedence lowerThanComma
 %precedence ','
+%precedence higherThanComma
 
 %start	Start
 
@@ -807,7 +820,7 @@ AlterTableStmt:
 	}
 
 AlterTableSpec:
-	TableOptionListOpt
+	AlterTableOptionListOpt
 	{
 		$$ = &ast.AlterTableSpec{
 			Tp:	ast.AlterTableOption,
@@ -820,6 +833,14 @@ AlterTableSpec:
 			Tp: 		ast.AlterTableAddColumn,
 			NewColumn:	$3.(*ast.ColumnDef),
 			Position:	$4.(*ast.ColumnPosition),
+		}
+	}
+|	"ADD" ColumnKeywordOpt '(' ColumnDef ColumnPosition ')'
+	{
+		$$ = &ast.AlterTableSpec{
+			Tp: 		ast.AlterTableAddColumn,
+			NewColumn:	$4.(*ast.ColumnDef),
+			Position:	$5.(*ast.ColumnPosition),
 		}
 	}
 |	"ADD" Constraint
@@ -1561,7 +1582,7 @@ DatabaseOptionList:
  *      )
  *******************************************************************/
 CreateTableStmt:
-	"CREATE" "TABLE" IfNotExists TableName '(' TableElementList ')' TableOptionListOpt PartitionOpt
+	"CREATE" "TABLE" IfNotExists TableName '(' TableElementList ')' CreateTableOptionListOpt PartitionOpt
 	{
 		tes := $6.([]interface {})
 		var columnDefs []*ast.ColumnDef
@@ -1607,6 +1628,8 @@ PartitionOpt:
 	{}
 |	"PARTITION" "BY" "RANGE" '(' Expression ')' PartitionNumOpt  PartitionDefinitionListOpt
 	{}
+|	"PARTITION" "BY" "RANGE" "COLUMNS" '(' ColumnNameList ')' PartitionNumOpt PartitionDefinitionListOpt
+	{}
 
 PartitionNumOpt:
 	{}
@@ -1631,6 +1654,8 @@ PartitionDefinition:
 PartDefValuesOpt:
 	{}
 |	"VALUES" "LESS" "THAN" "MAXVALUE"
+	{}
+|	"VALUES" "LESS" "THAN" '(' "MAXVALUE" ')'
 	{}
 |	"VALUES" "LESS" "THAN" '(' ExpressionList ')'
 	{}
@@ -2288,10 +2313,11 @@ UnReservedKeyword:
 | "REPEATABLE" | "COMMITTED" | "UNCOMMITTED" | "ONLY" | "SERIALIZABLE" | "LEVEL" | "VARIABLES" | "SQL_CACHE" | "INDEXES" | "PROCESSLIST"
 | "SQL_NO_CACHE" | "DISABLE"  | "ENABLE" | "REVERSE" | "PRIVILEGES" | "NO" | "BINLOG" | "FUNCTION" | "VIEW" | "MODIFY" | "EVENTS" | "PARTITIONS"
 | "NONE" | "SUPER" | "EXCLUSIVE" | "STATS_PERSISTENT" | "ROW_COUNT" | "COALESCE" | "MONTH" | "PROCESS" | "PROFILES"
-| "MICROSECOND" | "MINUTE" | "PLUGINS" | "QUERY" | "SECOND" | "SHARE" | "SHARED"
+| "MICROSECOND" | "MINUTE" | "PLUGINS" | "QUERY" | "SECOND" | "SHARE" | "SHARED" | "MAX_CONNECTIONS_PER_HOUR" | "MAX_QUERIES_PER_HOUR" | "MAX_UPDATES_PER_HOUR"
+| "MAX_USER_CONNECTIONS" | "REPLICATION" | "CLIENT" | "SLAVE"
 
 TiDBKeyword:
-"ADMIN" | "DDL" | "JOBS" | "STATS" | "STATS_META" | "STATS_HISTOGRAMS" | "STATS_BUCKETS" | "TIDB" | "TIDB_SMJ" | "TIDB_INLJ"
+"ADMIN" | "CANCEL" | "DDL" | "JOBS" | "STATS" | "STATS_META" | "STATS_HISTOGRAMS" | "STATS_BUCKETS" | "TIDB" | "TIDB_SMJ" | "TIDB_INLJ"
 
 NotKeywordToken:
  "ADDDATE" | "BIT_XOR" | "CAST" | "COUNT" | "CURTIME" | "DATE_ADD" | "DATE_SUB" | "EXTRACT" | "GET_FORMAT" | "GROUP_CONCAT" | "MIN" | "MAX" | "NOW" | "POSITION"
@@ -3938,8 +3964,10 @@ OuterOpt:
 
 CrossOpt:
 	"JOIN"
+|	"STRAIGHT_JOIN"
 |	"CROSS" "JOIN"
 |	"INNER" "JOIN"
+
 
 LimitClause:
 	{
@@ -4446,6 +4474,24 @@ AdminStmt:
 			Tables: $4.([]*ast.TableName),
 		}
 	}
+|	"ADMIN" "CANCEL" "DDL" "JOBS" NumList
+	{
+		$$ = &ast.AdminStmt{
+			Tp: ast.AdminCancelDDLJobs,
+			JobIDs: $5.([]int64),
+		}
+	}
+
+NumList:
+       NUM
+       {
+	        $$ = []int64{$1.(int64)}
+       }
+|
+       NumList ',' NUM
+       {
+	        $$ = append($1.([]int64), $3.(int64))
+       }
 
 /****************************Show Statement*******************************/
 ShowStmt:
@@ -4488,10 +4534,11 @@ ShowStmt:
 			User:	$4.(*auth.UserIdentity),
 		}
 	}
-|	"SHOW" "PROCESSLIST"
+|	"SHOW" OptFull "PROCESSLIST"
 	{
 		$$ = &ast.ShowStmt{
 			Tp: ast.ShowProcessList,
+			Full:	$2.(bool),
 		}
 	}
 |	"SHOW" "STATS_META" ShowLikeOrWhereOpt
@@ -4914,13 +4961,13 @@ TableElementList:
 	}
 
 TableOption:
-	"ENGINE" Identifier
+	"ENGINE" StringName
 	{
-		$$ = &ast.TableOption{Tp: ast.TableOptionEngine, StrValue: $2}
+		$$ = &ast.TableOption{Tp: ast.TableOptionEngine, StrValue: $2.(string)}
 	}
-|	"ENGINE" eq Identifier
+|	"ENGINE" eq StringName
 	{
-		$$ = &ast.TableOption{Tp: ast.TableOptionEngine, StrValue: $3}
+		$$ = &ast.TableOption{Tp: ast.TableOptionEngine, StrValue: $3.(string)}
 	}
 |	DefaultKwdOpt CharsetKw EqOpt CharsetName
 	{
@@ -4989,7 +5036,13 @@ StatsPersistentVal:
 |	LengthNum
 	{}
 
-TableOptionListOpt:
+AlterTableOptionListOpt:
+	{
+		$$ = []*ast.TableOption{}
+	}
+|	TableOptionList %prec higherThanComma
+
+CreateTableOptionListOpt:
 	{
 		$$ = []*ast.TableOption{}
 	}
@@ -5437,6 +5490,10 @@ FieldOpt:
 	{
 		$$ = &ast.TypeOpt{IsUnsigned: true}
 	}
+|	"SIGNED"
+	{
+		$$ = &ast.TypeOpt{IsUnsigned: false}
+	}
 |	"ZEROFILL"
 	{
 		$$ = &ast.TypeOpt{IsZerofill: true, IsUnsigned: true}
@@ -5696,6 +5753,22 @@ WithGrantOptionOpt:
 	{
 		$$ = true
 	}
+|	"WITH" "MAX_QUERIES_PER_HOUR" NUM
+	{
+		$$ = false
+	}
+|	"WITH" "MAX_UPDATES_PER_HOUR" NUM
+	{
+		$$ = false
+	}
+|	"WITH" "MAX_CONNECTIONS_PER_HOUR" NUM
+	{
+		$$ = false
+	}
+|	"WITH" "MAX_USER_CONNECTIONS" NUM
+	{
+		$$ = false
+	}
 
 PrivElem:
 	PrivType
@@ -5794,6 +5867,18 @@ PrivType:
 |	"REFERENCES"
 	{
 		$$ = mysql.ReferencesPriv
+	}
+|	"REPLICATION" "SLAVE"
+	{
+		$$ = mysql.PrivilegeType(0)
+	}
+|	"REPLICATION" "CLIENT"
+	{
+		$$ = mysql.PrivilegeType(0)
+	}
+|	"USAGE"
+	{
+		$$ = mysql.PrivilegeType(0)
 	}
 
 ObjectType:

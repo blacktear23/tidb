@@ -19,8 +19,8 @@ import (
 	. "github.com/pingcap/check"
 	"github.com/pingcap/tidb/mysql"
 	"github.com/pingcap/tidb/sessionctx/variable"
+	"github.com/pingcap/tidb/types"
 	"github.com/pingcap/tidb/util/codec"
-	"github.com/pingcap/tidb/util/types"
 	"github.com/pingcap/tipb/go-tipb"
 )
 
@@ -31,7 +31,7 @@ type testEvalSuite struct{}
 // TestEval test expr.Eval().
 // TODO: add more tests.
 func (s *testEvalSuite) TestEval(c *C) {
-	row := []types.Datum{types.NewDatum(100)}
+	row := types.DatumRow{types.NewDatum(100)}
 	fieldTps := make([]*types.FieldType, 1)
 	fieldTps[0] = types.NewFieldType(mysql.TypeDouble)
 	tests := []struct {

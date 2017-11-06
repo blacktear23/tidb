@@ -12,7 +12,7 @@ path_to_add := $(addsuffix /bin,$(subst :,/bin:,$(CURDIR)/_vendor:$(GOPATH)))
 export PATH := $(path_to_add):$(PATH)
 
 GO        := go
-GOBUILD   := GOPATH=$(CURDIR)/_vendor:$(GOPATH) CGO_ENABLED=0 $(GO) build
+GOBUILD   := GOPATH=$(CURDIR)/_vendor:$(GOPATH) CGO_ENABLED=0 $(GO) build $(BUILD_FLAG)
 GOTEST    := GOPATH=$(CURDIR)/_vendor:$(GOPATH) CGO_ENABLED=1 $(GO) test -p 3
 OVERALLS  := GOPATH=$(CURDIR)/_vendor:$(GOPATH) CGO_ENABLED=1 overalls
 GOVERALLS := goveralls
@@ -24,6 +24,7 @@ PACKAGES  := $$(go list ./...| grep -vE "vendor")
 FILES     := $$(find . -name "*.go" | grep -vE "vendor")
 TOPDIRS   := $$(ls -d */ | grep -vE "vendor")
 
+LDFLAGS += -X "github.com/pingcap/tidb/mysql.TiDBReleaseVersion=$(shell git describe --tags --dirty)"
 LDFLAGS += -X "github.com/pingcap/tidb/util/printer.TiDBBuildTS=$(shell date -u '+%Y-%m-%d %I:%M:%S')"
 LDFLAGS += -X "github.com/pingcap/tidb/util/printer.TiDBGitHash=$(shell git rev-parse HEAD)"
 LDFLAGS += -X "github.com/pingcap/tidb/util/printer.TiDBGitBranch=$(shell git rev-parse --abbrev-ref HEAD)"
@@ -39,7 +40,7 @@ buildsucc:
 
 all: dev server benchkv
 
-dev: checklist parserlib build benchkv test check
+dev: checklist parserlib test check
 
 build:
 	$(GOBUILD)

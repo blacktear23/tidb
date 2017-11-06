@@ -20,7 +20,7 @@ import (
 	"github.com/pingcap/tidb/expression"
 	"github.com/pingcap/tidb/mysql"
 	"github.com/pingcap/tidb/sessionctx/variable"
-	"github.com/pingcap/tidb/util/types"
+	"github.com/pingcap/tidb/types"
 )
 
 type countFunction struct {
@@ -64,7 +64,7 @@ func (cf *countFunction) GetType() *types.FieldType {
 }
 
 // Update implements Aggregation interface.
-func (cf *countFunction) Update(ctx *AggEvaluateContext, sc *variable.StatementContext, row []types.Datum) error {
+func (cf *countFunction) Update(ctx *AggEvaluateContext, sc *variable.StatementContext, row types.Row) error {
 	var datumBuf []types.Datum
 	if cf.Distinct {
 		datumBuf = make([]types.Datum, 0, len(cf.Args))

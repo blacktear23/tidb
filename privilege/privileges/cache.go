@@ -25,9 +25,9 @@ import (
 	"github.com/pingcap/tidb/context"
 	"github.com/pingcap/tidb/mysql"
 	"github.com/pingcap/tidb/terror"
+	"github.com/pingcap/tidb/types"
 	"github.com/pingcap/tidb/util/sqlexec"
 	"github.com/pingcap/tidb/util/stringutil"
-	"github.com/pingcap/tidb/util/types"
 )
 
 var (
@@ -433,7 +433,7 @@ func (p *MySQLPrivilege) RequestVerification(user, host, db, table, column strin
 		return true
 	}
 
-	return false
+	return priv == 0
 }
 
 // DBIsVisible checks whether the user can see the db.

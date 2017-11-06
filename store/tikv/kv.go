@@ -26,7 +26,6 @@ import (
 	"github.com/grpc-ecosystem/go-grpc-prometheus"
 	"github.com/juju/errors"
 	"github.com/pingcap/pd/pd-client"
-	"github.com/pingcap/tidb"
 	"github.com/pingcap/tidb/kv"
 	"github.com/pingcap/tidb/store/tikv/mock-tikv"
 	"github.com/pingcap/tidb/store/tikv/oracle"
@@ -129,7 +128,7 @@ type tikvStore struct {
 	pdClient     pd.Client
 	regionCache  *RegionCache
 	lockResolver *LockResolver
-	gcWorker     *GCWorker
+	gcWorker     GCHandler
 	etcdAddrs    []string
 	mock         bool
 	enableGC     bool
@@ -137,9 +136,8 @@ type tikvStore struct {
 	kv        SafePointKV
 	safePoint uint64
 	spTime    time.Time
-	spSession tidb.Session  // this is used to obtain safePoint from remote
 	spMutex   sync.RWMutex  // this is used to update safePoint and spTime
-	spMsg     chan struct{} // this is used to nofity when the store is closed
+	closed    chan struct{} // this is used to nofity when the store is closed
 }
 
 func (s *tikvStore) UpdateSPCache(cachedSP uint64, cachedTime time.Time) {
@@ -156,7 +154,7 @@ func (s *tikvStore) CheckVisibility(startTime uint64) error {
 	s.spMutex.RUnlock()
 	diff := time.Since(cachedTime)
 
-	if diff > (gcSafePointCacheInterval - gcCPUTimeInaccuracyBound) {
+	if diff > (GcSafePointCacheInterval - gcCPUTimeInaccuracyBound) {
 		return ErrPDServerTimeout.GenByArgs("start timestamp may fall behind safe point")
 	}
 
@@ -182,10 +180,12 @@ func newTikvStore(uuid string, pdClient pd.Client, spkv SafePointKV, client Clie
 		kv:          spkv,
 		safePoint:   0,
 		spTime:      time.Now(),
-		spMsg:       make(chan struct{}),
+		closed:      make(chan struct{}),
 	}
 	store.lockResolver = newLockResolver(store)
 	store.enableGC = enableGC
+
+	go store.runSafePointChecker()
 
 	return store, nil
 }
@@ -196,12 +196,38 @@ func (s *tikvStore) EtcdAddrs() []string {
 
 // StartGCWorker starts GC worker, it's called in BootstrapSession, don't call this function more than once.
 func (s *tikvStore) StartGCWorker() error {
-	gcWorker, err := NewGCWorker(s, s.enableGC)
+	if !s.enableGC || NewGCHandlerFunc == nil {
+		return nil
+	}
+
+	gcWorker, err := NewGCHandlerFunc(s)
 	if err != nil {
 		return errors.Trace(err)
 	}
+	gcWorker.Start()
 	s.gcWorker = gcWorker
 	return nil
+}
+
+func (s *tikvStore) runSafePointChecker() {
+	d := gcSafePointUpdateInterval
+	for {
+		select {
+		case spCachedTime := <-time.After(d):
+			cachedSafePoint, err := loadSafePoint(s.GetSafePointKV(), GcSavedSafePoint)
+			if err == nil {
+				loadSafepointCounter.WithLabelValues("ok").Inc()
+				s.UpdateSPCache(cachedSafePoint, spCachedTime)
+				d = gcSafePointUpdateInterval
+			} else {
+				loadSafepointCounter.WithLabelValues("fail").Inc()
+				log.Errorf("[tikv] fail to load safepoint: %v", err)
+				d = gcSafePointQuickRepeatInterval
+			}
+		case <-s.Closed():
+			return
+		}
+	}
 }
 
 type mockOptions struct {
@@ -220,14 +246,6 @@ type MockTiKVStoreOption func(*mockOptions)
 func WithHijackClient(wrap func(Client) Client) MockTiKVStoreOption {
 	return func(c *mockOptions) {
 		c.clientHijack = wrap
-	}
-}
-
-// WithHijackPDClient hijacks PD client's behavior, makes it easy to simulate the network
-// problem between TiDB and PD, such as GetTS too slow, GetStore or GetRegion fail.
-func WithHijackPDClient(wrap func(pd.Client) pd.Client) MockTiKVStoreOption {
-	return func(c *mockOptions) {
-		c.pdClientHijack = wrap
 	}
 }
 
@@ -330,7 +348,7 @@ func (s *tikvStore) Close() error {
 		s.gcWorker.Close()
 	}
 
-	close(s.spMsg)
+	close(s.closed)
 
 	if err := s.client.Close(); err != nil {
 		return errors.Trace(err)
@@ -391,10 +409,32 @@ func (s *tikvStore) GetRegionCache() *RegionCache {
 	return s.regionCache
 }
 
-// ParseEtcdAddr parses path to etcd address list
-func ParseEtcdAddr(path string) (etcdAddrs []string, err error) {
-	etcdAddrs, _, err = parsePath(path)
-	return
+func (s *tikvStore) GetLockResolver() *LockResolver {
+	return s.lockResolver
+}
+
+func (s *tikvStore) GetGCHandler() GCHandler {
+	return s.gcWorker
+}
+
+func (s *tikvStore) Closed() <-chan struct{} {
+	return s.closed
+}
+
+func (s *tikvStore) GetSafePointKV() SafePointKV {
+	return s.kv
+}
+
+func (s *tikvStore) SetOracle(oracle oracle.Oracle) {
+	s.oracle = oracle
+}
+
+func (s *tikvStore) SetTiKVClient(client Client) {
+	s.client = client
+}
+
+func (s *tikvStore) GetTiKVClient() (client Client) {
+	return s.client
 }
 
 func parsePath(path string) (etcdAddrs []string, disableGC bool, err error) {

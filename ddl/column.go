@@ -20,6 +20,7 @@ import (
 	"github.com/juju/errors"
 	"github.com/pingcap/tidb/ast"
 	"github.com/pingcap/tidb/context"
+	"github.com/pingcap/tidb/ddl/util"
 	"github.com/pingcap/tidb/infoschema"
 	"github.com/pingcap/tidb/kv"
 	"github.com/pingcap/tidb/meta"
@@ -27,7 +28,7 @@ import (
 	"github.com/pingcap/tidb/mysql"
 	"github.com/pingcap/tidb/table"
 	"github.com/pingcap/tidb/tablecodec"
-	"github.com/pingcap/tidb/util/types"
+	"github.com/pingcap/tidb/types"
 )
 
 func (d *ddl) adjustColumnOffset(columns []*model.ColumnInfo, indices []*model.IndexInfo, offset int, added bool) {
@@ -104,7 +105,7 @@ func (d *ddl) onAddColumn(t *meta.Meta, job *model.Job) (ver int64, _ error) {
 	offset := 0
 	err = job.DecodeArgs(col, pos, &offset)
 	if err != nil {
-		job.State = model.JobCancelled
+		job.State = model.JobStateCancelled
 		return ver, errors.Trace(err)
 	}
 
@@ -112,13 +113,13 @@ func (d *ddl) onAddColumn(t *meta.Meta, job *model.Job) (ver int64, _ error) {
 	if columnInfo != nil {
 		if columnInfo.State == model.StatePublic {
 			// We already have a column with the same column name.
-			job.State = model.JobCancelled
+			job.State = model.JobStateCancelled
 			return ver, infoschema.ErrColumnExists.GenByArgs(col.Name)
 		}
 	} else {
 		columnInfo, offset, err = d.createColumnInfo(tblInfo, col, pos)
 		if err != nil {
-			job.State = model.JobCancelled
+			job.State = model.JobStateCancelled
 			return ver, errors.Trace(err)
 		}
 		// Set offset arg to job.
@@ -156,9 +157,9 @@ func (d *ddl) onAddColumn(t *meta.Meta, job *model.Job) (ver int64, _ error) {
 		}
 
 		// Finish this job.
-		job.State = model.JobDone
+		job.State = model.JobStateDone
 		job.BinlogInfo.AddTableInfo(ver, tblInfo)
-		d.asyncNotifyEvent(&Event{Tp: model.ActionAddColumn, TableInfo: tblInfo, ColumnInfo: columnInfo})
+		d.asyncNotifyEvent(&util.Event{Tp: model.ActionAddColumn, TableInfo: tblInfo, ColumnInfo: columnInfo})
 	default:
 		err = ErrInvalidColumnState.Gen("invalid column state %v", columnInfo.State)
 	}
@@ -176,17 +177,17 @@ func (d *ddl) onDropColumn(t *meta.Meta, job *model.Job) (ver int64, _ error) {
 	var colName model.CIStr
 	err = job.DecodeArgs(&colName)
 	if err != nil {
-		job.State = model.JobCancelled
+		job.State = model.JobStateCancelled
 		return ver, errors.Trace(err)
 	}
 
 	colInfo := findCol(tblInfo.Columns, colName.L)
 	if colInfo == nil {
-		job.State = model.JobCancelled
+		job.State = model.JobStateCancelled
 		return ver, ErrCantDropFieldOrKey.Gen("column %s doesn't exist", colName)
 	}
 	if err = isDroppableColumn(tblInfo, colName); err != nil {
-		job.State = model.JobCancelled
+		job.State = model.JobStateCancelled
 		return ver, errors.Trace(err)
 	}
 
@@ -226,9 +227,9 @@ func (d *ddl) onDropColumn(t *meta.Meta, job *model.Job) (ver int64, _ error) {
 		}
 
 		// Finish this job.
-		job.State = model.JobDone
+		job.State = model.JobStateDone
 		job.BinlogInfo.AddTableInfo(ver, tblInfo)
-		d.asyncNotifyEvent(&Event{Tp: model.ActionDropColumn, TableInfo: tblInfo, ColumnInfo: colInfo})
+		d.asyncNotifyEvent(&util.Event{Tp: model.ActionDropColumn, TableInfo: tblInfo, ColumnInfo: colInfo})
 	default:
 		err = ErrInvalidTableState.Gen("invalid table state %v", tblInfo.State)
 	}
@@ -258,7 +259,7 @@ func (d *ddl) addTableColumn(t table.Table, columnInfo *model.ColumnInfo, reorgI
 	if columnInfo.DefaultValue != nil {
 		colMeta.defaultVal, err = table.GetColDefaultValue(ctx, columnInfo)
 		if err != nil {
-			job.State = model.JobCancelled
+			job.State = model.JobStateCancelled
 			log.Errorf("[ddl] fatal: this case shouldn't happen, column %v err %v", columnInfo, err)
 			return errors.Trace(err)
 		}
@@ -387,7 +388,7 @@ func (d *ddl) onSetDefaultValue(t *meta.Meta, job *model.Job) (ver int64, _ erro
 	newCol := &model.ColumnInfo{}
 	err := job.DecodeArgs(newCol)
 	if err != nil {
-		job.State = model.JobCancelled
+		job.State = model.JobStateCancelled
 		return ver, errors.Trace(err)
 	}
 
@@ -400,7 +401,7 @@ func (d *ddl) onModifyColumn(t *meta.Meta, job *model.Job) (ver int64, _ error) 
 	pos := &ast.ColumnPosition{}
 	err := job.DecodeArgs(newCol, oldColName, pos)
 	if err != nil {
-		job.State = model.JobCancelled
+		job.State = model.JobStateCancelled
 		return ver, errors.Trace(err)
 	}
 
@@ -416,7 +417,7 @@ func (d *ddl) doModifyColumn(t *meta.Meta, job *model.Job, col *model.ColumnInfo
 
 	oldCol := findCol(tblInfo.Columns, oldName.L)
 	if oldCol == nil || oldCol.State != model.StatePublic {
-		job.State = model.JobCancelled
+		job.State = model.JobStateCancelled
 		return ver, infoschema.ErrColumnNotExists.GenByArgs(oldName, tblInfo.Name)
 	}
 
@@ -425,13 +426,13 @@ func (d *ddl) doModifyColumn(t *meta.Meta, job *model.Job, col *model.ColumnInfo
 	if pos.Tp == ast.ColumnPositionAfter {
 		if oldName.L == pos.RelativeColumn.Name.L {
 			// `alter table tableName modify column b int after b` will return ver,ErrColumnNotExists.
-			job.State = model.JobCancelled
+			job.State = model.JobStateCancelled
 			return ver, infoschema.ErrColumnNotExists.GenByArgs(oldName, tblInfo.Name)
 		}
 
 		relative := findCol(tblInfo.Columns, pos.RelativeColumn.Name.L)
 		if relative == nil || relative.State != model.StatePublic {
-			job.State = model.JobCancelled
+			job.State = model.JobStateCancelled
 			return ver, infoschema.ErrColumnNotExists.GenByArgs(pos.RelativeColumn, tblInfo.Name)
 		}
 
@@ -482,11 +483,11 @@ func (d *ddl) doModifyColumn(t *meta.Meta, job *model.Job, col *model.ColumnInfo
 	job.SchemaState = model.StatePublic
 	ver, err = updateTableInfo(t, job, tblInfo, originalState)
 	if err != nil {
-		job.State = model.JobCancelled
+		job.State = model.JobStateCancelled
 		return ver, errors.Trace(err)
 	}
 
-	job.State = model.JobDone
+	job.State = model.JobStateDone
 	job.BinlogInfo.AddTableInfo(ver, tblInfo)
 	return ver, nil
 }
@@ -498,7 +499,7 @@ func (d *ddl) updateColumn(t *meta.Meta, job *model.Job, newCol *model.ColumnInf
 	}
 	oldCol := findCol(tblInfo.Columns, oldColName.L)
 	if oldCol == nil || oldCol.State != model.StatePublic {
-		job.State = model.JobCancelled
+		job.State = model.JobStateCancelled
 		return ver, infoschema.ErrColumnNotExists.GenByArgs(newCol.Name, tblInfo.Name)
 	}
 	*oldCol = *newCol
@@ -507,11 +508,11 @@ func (d *ddl) updateColumn(t *meta.Meta, job *model.Job, newCol *model.ColumnInf
 	job.SchemaState = model.StatePublic
 	ver, err = updateTableInfo(t, job, tblInfo, originalState)
 	if err != nil {
-		job.State = model.JobCancelled
+		job.State = model.JobStateCancelled
 		return ver, errors.Trace(err)
 	}
 
-	job.State = model.JobDone
+	job.State = model.JobStateDone
 	job.BinlogInfo.AddTableInfo(ver, tblInfo)
 	return ver, nil
 }

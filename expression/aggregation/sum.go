@@ -19,7 +19,7 @@ import (
 	"github.com/pingcap/tidb/expression"
 	"github.com/pingcap/tidb/mysql"
 	"github.com/pingcap/tidb/sessionctx/variable"
-	"github.com/pingcap/tidb/util/types"
+	"github.com/pingcap/tidb/types"
 )
 
 type sumFunction struct {
@@ -36,7 +36,7 @@ func (sf *sumFunction) Clone() Aggregation {
 }
 
 // Update implements Aggregation interface.
-func (sf *sumFunction) Update(ctx *AggEvaluateContext, sc *variable.StatementContext, row []types.Datum) error {
+func (sf *sumFunction) Update(ctx *AggEvaluateContext, sc *variable.StatementContext, row types.Row) error {
 	return sf.updateSum(ctx, sc, row)
 }
 

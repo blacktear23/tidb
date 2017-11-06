@@ -40,10 +40,13 @@ import (
 	"github.com/pingcap/tidb/table/tables"
 	"github.com/pingcap/tidb/tablecodec"
 	"github.com/pingcap/tidb/terror"
+	"github.com/pingcap/tidb/types"
+	"github.com/pingcap/tidb/util/admin"
+	"github.com/pingcap/tidb/util/mock"
 	"github.com/pingcap/tidb/util/testkit"
 	"github.com/pingcap/tidb/util/testleak"
 	"github.com/pingcap/tidb/util/testutil"
-	"github.com/pingcap/tidb/util/types"
+	goctx "golang.org/x/net/context"
 )
 
 const (
@@ -231,6 +234,7 @@ func backgroundExec(s kv.Storage, sql string, done chan error) {
 }
 
 func (s *testDBSuite) TestAddUniqueIndexRollback(c *C) {
+	s.tk = testkit.NewTestKit(c, s.store)
 	s.mustExec(c, "use test_db")
 	s.mustExec(c, "drop table if exists t1")
 	s.mustExec(c, "create table t1 (c1 int, c2 int, c3 int, primary key(c1))")
@@ -285,6 +289,102 @@ LOOP:
 		s.mustExec(c, "delete from t1 where c1 = ?", i+10)
 	}
 	sessionExec(c, s.store, "create index c3_index on t1 (c3)")
+
+	s.mustExec(c, "drop table t1")
+}
+
+func (s *testDBSuite) TestCancelAddIndex(c *C) {
+	s.tk = testkit.NewTestKit(c, s.store)
+	s.mustExec(c, "use test_db")
+	s.mustExec(c, "drop table if exists t1")
+	s.mustExec(c, "create table t1 (c1 int, c2 int, c3 int, primary key(c1))")
+	// defaultBatchSize is equal to ddl.defaultBatchSize
+	base := defaultBatchSize * 2
+	count := base
+	// add some rows
+	for i := 0; i < count; i++ {
+		s.mustExec(c, "insert into t1 values (?, ?, ?)", i, i, i)
+	}
+
+	var checkErr error
+	hook := &ddl.TestDDLCallback{}
+	first := true
+	hook.OnJobUpdatedExported = func(job *model.Job) {
+		addIndexNotFirstReorg := job.Type == model.ActionAddIndex && job.SchemaState == model.StateWriteReorganization && job.SnapshotVer != 0
+		// If the action is adding index and the state is writing reorganization, it want to test the case of cancelling the job when backfilling indexes.
+		// When the job satisfies this case of addIndexNotFirstReorg, the worker will start to backfill indexes.
+		if !addIndexNotFirstReorg {
+			return
+		}
+		// The job satisfies the case of addIndexNotFirst for the first time, the worker hasn't finished a batch of backfill indexes.
+		if first {
+			first = false
+			return
+		}
+		if checkErr != nil {
+			return
+		}
+		hookCtx := mock.NewContext()
+		hookCtx.Store = s.store
+		var err error
+		err = hookCtx.NewTxn()
+		if err != nil {
+			checkErr = errors.Trace(err)
+			return
+		}
+		jobIDs := []int64{job.ID}
+		errs, err := admin.CancelJobs(hookCtx.Txn(), jobIDs)
+		if err != nil {
+			checkErr = errors.Trace(err)
+			return
+		}
+		// It only tests cancel one DDL job.
+		if errs[0] != nil {
+			checkErr = errors.Trace(errs[0])
+			return
+		}
+		err = hookCtx.Txn().Commit(goctx.Background())
+		if err != nil {
+			checkErr = errors.Trace(err)
+		}
+	}
+	originHook := s.dom.DDL().GetHook()
+	s.dom.DDL().SetHook(hook)
+	defer s.dom.DDL().SetHook(originHook)
+	done := make(chan error, 1)
+	go backgroundExec(s.store, "create unique index c3_index on t1 (c3)", done)
+
+	times := 0
+	ticker := time.NewTicker(s.lease / 2)
+	defer ticker.Stop()
+LOOP:
+	for {
+		select {
+		case err := <-done:
+			c.Assert(checkErr, IsNil)
+			c.Assert(err, NotNil)
+			c.Assert(err.Error(), Equals, "[ddl:12]cancelled DDL job")
+			break LOOP
+		case <-ticker.C:
+			if times >= 10 {
+				break
+			}
+			step := 10
+			// delete some rows, and add some data
+			for i := count; i < count+step; i++ {
+				n := rand.Intn(count)
+				s.mustExec(c, "delete from t1 where c1 = ?", n)
+				s.mustExec(c, "insert into t1 values (?, ?, ?)", i+10, i, i)
+			}
+			count += step
+			times++
+		}
+	}
+
+	t := s.testGetTable(c, "t1")
+	for _, tidx := range t.Indices() {
+		c.Assert(strings.EqualFold(tidx.Meta().Name.L, "c3_index"), IsFalse)
+	}
 
 	s.mustExec(c, "drop table t1")
 }
@@ -1112,6 +1212,7 @@ func (s *testDBSuite) TestCreateTableTooLarge(c *C) {
 }
 
 func (s *testDBSuite) TestCreateTableWithLike(c *C) {
+	s.tk = testkit.NewTestKit(c, s.store)
 	// for the same database
 	s.tk.MustExec("use test")
 	s.tk.MustExec("create table tt(id int primary key)")
@@ -1132,7 +1233,7 @@ func (s *testDBSuite) TestCreateTableWithLike(c *C) {
 	hasNotNull := tmysql.HasNotNullFlag(col.Flag)
 	c.Assert(hasNotNull, IsTrue)
 
-	s.tk.MustExec("drop table tt, t, t1")
+	s.tk.MustExec("drop table tt, t1")
 
 	// for different databases
 	s.tk.MustExec("create database test1")
@@ -1155,7 +1256,8 @@ func (s *testDBSuite) TestCreateTableWithLike(c *C) {
 	failSQL = fmt.Sprintf("create table t1 like test.t")
 	s.testErrorCode(c, failSQL, tmysql.ErrTableExists)
 
-	s.tk.MustExec("drop table t1")
+	s.tk.MustExec("drop database test1")
+	s.tk.MustExec("drop table test.t")
 }
 
 func (s *testDBSuite) TestCreateTable(c *C) {
@@ -1225,14 +1327,15 @@ func (s *testDBSuite) TestTruncateTable(c *C) {
 }
 
 func (s *testDBSuite) TestRenameTable(c *C) {
-	s.testRenameTable(c, "rename_table", "rename table %s to %s")
+	s.testRenameTable(c, "rename table %s to %s")
 }
 
 func (s *testDBSuite) TestAlterTableRenameTable(c *C) {
-	s.testRenameTable(c, "alter_table_rename_table", "alter table %s rename to %s")
+	s.testRenameTable(c, "alter table %s rename to %s")
 }
 
-func (s *testDBSuite) testRenameTable(c *C, storeStr, sql string) {
+func (s *testDBSuite) testRenameTable(c *C, sql string) {
+	s.tk = testkit.NewTestKit(c, s.store)
 	s.tk.MustExec("use test")
 	// for different databases
 	s.tk.MustExec("create table t (c1 int, c2 int)")
@@ -1251,7 +1354,9 @@ func (s *testDBSuite) testRenameTable(c *C, storeStr, sql string) {
 	c.Assert(newTblInfo.Meta().ID, Equals, oldTblID)
 	s.tk.MustQuery("select * from t1").Check(testkit.Rows("1 1", "2 2"))
 	s.tk.MustExec("use test")
-	s.tk.MustQuery("show tables").Check(testkit.Rows())
+	// Make sure t doesn't exist.
+	s.tk.MustExec("create table t (c1 int, c2 int)")
+	s.tk.MustExec("drop table t")
 
 	// for the same database
 	s.tk.MustExec("use test1")
@@ -1275,7 +1380,7 @@ func (s *testDBSuite) testRenameTable(c *C, storeStr, sql string) {
 	failSQL = fmt.Sprintf(sql, "test1.t2", "test1.t2")
 	s.testErrorCode(c, failSQL, tmysql.ErrTableExists)
 
-	s.tk.MustExec("drop table test1.t2")
+	s.tk.MustExec("drop database test1")
 }
 
 func (s *testDBSuite) TestRenameMultiTables(c *C) {

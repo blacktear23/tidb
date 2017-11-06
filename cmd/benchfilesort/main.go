@@ -26,12 +26,12 @@ import (
 
 	log "github.com/Sirupsen/logrus"
 	"github.com/juju/errors"
-	"github.com/pingcap/pd/pkg/logutil"
 	"github.com/pingcap/tidb/sessionctx/variable"
 	"github.com/pingcap/tidb/terror"
+	"github.com/pingcap/tidb/types"
 	"github.com/pingcap/tidb/util/codec"
 	"github.com/pingcap/tidb/util/filesort"
-	"github.com/pingcap/tidb/util/types"
+	"github.com/pingcap/tidb/util/logutil"
 )
 
 type comparableRow struct {

@@ -19,15 +19,15 @@ import (
 	log "github.com/Sirupsen/logrus"
 	"github.com/juju/errors"
 	"github.com/pingcap/tidb/ast"
-	"github.com/pingcap/tidb/ddl"
+	"github.com/pingcap/tidb/ddl/util"
 	"github.com/pingcap/tidb/model"
 	"github.com/pingcap/tidb/mysql"
+	"github.com/pingcap/tidb/types"
 	"github.com/pingcap/tidb/util/sqlexec"
-	"github.com/pingcap/tidb/util/types"
 )
 
 // HandleDDLEvent begins to process a ddl task.
-func (h *Handle) HandleDDLEvent(t *ddl.Event) error {
+func (h *Handle) HandleDDLEvent(t *util.Event) error {
 	switch t.Tp {
 	case model.ActionCreateTable:
 		return h.insertTableStats2KV(t.TableInfo)
@@ -46,7 +46,7 @@ func (h *Handle) HandleDDLEvent(t *ddl.Event) error {
 }
 
 // DDLEventCh returns ddl events channel in handle.
-func (h *Handle) DDLEventCh() chan *ddl.Event {
+func (h *Handle) DDLEventCh() chan *util.Event {
 	return h.ddlEventCh
 }
 
@@ -137,7 +137,7 @@ func (h *Handle) insertColStats2KV(tableID int64, colInfo *model.ColumnInfo) err
 		}
 		if value.IsNull() {
 			// If the adding column has default value null, all the existing rows have null value on the newly added column.
-			_, err = exec.Execute(fmt.Sprintf("insert into mysql.stats_histograms (version, table_id, is_index, hist_id, distinct_count, null_count) values (%d, %d, 0, %d, 1, %d)", h.ctx.Txn().StartTS(), tableID, colInfo.ID, count))
+			_, err = exec.Execute(fmt.Sprintf("insert into mysql.stats_histograms (version, table_id, is_index, hist_id, distinct_count, null_count) values (%d, %d, 0, %d, 0, %d)", h.ctx.Txn().StartTS(), tableID, colInfo.ID, count))
 			if err != nil {
 				return errors.Trace(err)
 			}
