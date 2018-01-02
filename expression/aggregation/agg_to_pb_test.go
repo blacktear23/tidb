@@ -15,7 +15,6 @@ package aggregation
 
 import (
 	"encoding/json"
-	"sync/atomic"
 	"testing"
 
 	. "github.com/pingcap/check"
@@ -25,9 +24,9 @@ import (
 	"github.com/pingcap/tidb/kv"
 	"github.com/pingcap/tidb/mysql"
 	"github.com/pingcap/tidb/parser"
-	"github.com/pingcap/tidb/sessionctx/variable"
+	"github.com/pingcap/tidb/sessionctx/stmtctx"
+	"github.com/pingcap/tidb/types"
 	"github.com/pingcap/tidb/util/mock"
-	"github.com/pingcap/tidb/util/types"
 	"github.com/pingcap/tipb/go-tipb"
 	goctx "golang.org/x/net/context"
 )
@@ -109,15 +108,13 @@ type testEvaluatorSuite struct {
 func (s *testEvaluatorSuite) SetUpSuite(c *C) {
 	s.Parser = parser.New()
 	s.ctx = mock.NewContext()
-	atomic.StoreInt32(&expression.TurnOnNewExprEval, 1)
 }
 
 func (s *testEvaluatorSuite) TearDownSuite(c *C) {
-	atomic.StoreInt32(&expression.TurnOnNewExprEval, 0)
 }
 
 func (s *testEvaluatorSuite) TestAggFunc2Pb(c *C) {
-	sc := new(variable.StatementContext)
+	sc := new(stmtctx.StatementContext)
 	client := new(mockKvClient)
 	dg := new(dataGen4Expr2PbTest)
 

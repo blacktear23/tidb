@@ -231,16 +231,6 @@ func (n *TableSource) Accept(v Visitor) (Node, bool) {
 	return v.Leave(n)
 }
 
-// SetResultFields implements ResultSetNode interface.
-func (n *TableSource) SetResultFields(rfs []*ResultField) {
-	n.Source.SetResultFields(rfs)
-}
-
-// GetResultFields implements ResultSetNode interface.
-func (n *TableSource) GetResultFields() []*ResultField {
-	return n.Source.GetResultFields()
-}
-
 // SelectLockType is the lock type for SelectStmt.
 type SelectLockType int
 
@@ -964,6 +954,7 @@ const (
 	ShowStatsHistograms
 	ShowStatsBuckets
 	ShowPlugins
+	ShowProfiles
 )
 
 // ShowStmt is a statement to provide information about databases, tables, columns and so on.

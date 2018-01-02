@@ -21,8 +21,8 @@ import (
 	"github.com/juju/errors"
 	"github.com/pingcap/tidb/context"
 	"github.com/pingcap/tidb/mysql"
+	"github.com/pingcap/tidb/types"
 	"github.com/pingcap/tidb/util/printer"
-	"github.com/pingcap/tidb/util/types"
 )
 
 var (
@@ -51,6 +51,7 @@ var (
 	_ builtinFunc = &builtinLastInsertIDWithIDSig{}
 	_ builtinFunc = &builtinVersionSig{}
 	_ builtinFunc = &builtinTiDBVersionSig{}
+	_ builtinFunc = &builtinRowCountSig{}
 )
 
 type databaseFunctionClass struct {
@@ -61,20 +62,19 @@ func (c *databaseFunctionClass) getFunction(ctx context.Context, args []Expressi
 	if err := errors.Trace(c.verifyArgs(args)); err != nil {
 		return nil, err
 	}
-	bf := newBaseBuiltinFuncWithTp(args, ctx, tpString)
+	bf := newBaseBuiltinFuncWithTp(ctx, args, types.ETString)
 	bf.tp.Flen = 64
-	bf.foldable = false
-	sig := &builtinDatabaseSig{baseStringBuiltinFunc{bf}}
-	return sig.setSelf(sig), nil
+	sig := &builtinDatabaseSig{bf}
+	return sig, nil
 }
 
 type builtinDatabaseSig struct {
-	baseStringBuiltinFunc
+	baseBuiltinFunc
 }
 
 // evalString evals a builtinDatabaseSig.
 // See https://dev.mysql.com/doc/refman/5.7/en/information-functions.html
-func (b *builtinDatabaseSig) evalString(row []types.Datum) (string, bool, error) {
+func (b *builtinDatabaseSig) evalString(row types.Row) (string, bool, error) {
 	currentDB := b.ctx.GetSessionVars().CurrentDB
 	return currentDB, currentDB == "", nil
 }
@@ -87,21 +87,20 @@ func (c *foundRowsFunctionClass) getFunction(ctx context.Context, args []Express
 	if err := errors.Trace(c.verifyArgs(args)); err != nil {
 		return nil, err
 	}
-	bf := newBaseBuiltinFuncWithTp(args, ctx, tpInt)
+	bf := newBaseBuiltinFuncWithTp(ctx, args, types.ETInt)
 	bf.tp.Flag |= mysql.UnsignedFlag
-	bf.foldable = false
-	sig := &builtinFoundRowsSig{baseIntBuiltinFunc{bf}}
-	return sig.setSelf(sig), nil
+	sig := &builtinFoundRowsSig{bf}
+	return sig, nil
 }
 
 type builtinFoundRowsSig struct {
-	baseIntBuiltinFunc
+	baseBuiltinFunc
 }
 
 // evalInt evals a builtinFoundRowsSig.
 // See https://dev.mysql.com/doc/refman/5.7/en/information-functions.html#function_found-rows
 // TODO: SQL_CALC_FOUND_ROWS and LIMIT not support for now, We will finish in another PR.
-func (b *builtinFoundRowsSig) evalInt(row []types.Datum) (int64, bool, error) {
+func (b *builtinFoundRowsSig) evalInt(row types.Row) (int64, bool, error) {
 	data := b.ctx.GetSessionVars()
 	if data == nil {
 		return 0, true, errors.Errorf("Missing session variable when eval builtin")
@@ -117,21 +116,20 @@ func (c *currentUserFunctionClass) getFunction(ctx context.Context, args []Expre
 	if err := errors.Trace(c.verifyArgs(args)); err != nil {
 		return nil, errors.Trace(err)
 	}
-	bf := newBaseBuiltinFuncWithTp(args, ctx, tpString)
+	bf := newBaseBuiltinFuncWithTp(ctx, args, types.ETString)
 	bf.tp.Flen = 64
-	bf.foldable = false
-	sig := &builtinCurrentUserSig{baseStringBuiltinFunc{bf}}
-	return sig.setSelf(sig), nil
+	sig := &builtinCurrentUserSig{bf}
+	return sig, nil
 }
 
 type builtinCurrentUserSig struct {
-	baseStringBuiltinFunc
+	baseBuiltinFunc
 }
 
 // evalString evals a builtinCurrentUserSig.
 // See https://dev.mysql.com/doc/refman/5.7/en/information-functions.html#function_current-user
 // TODO: The value of CURRENT_USER() can differ from the value of USER(). We will finish this after we support grant tables.
-func (b *builtinCurrentUserSig) evalString(row []types.Datum) (string, bool, error) {
+func (b *builtinCurrentUserSig) evalString(row types.Row) (string, bool, error) {
 	data := b.ctx.GetSessionVars()
 	if data == nil || data.User == nil {
 		return "", true, errors.Errorf("Missing session variable when eval builtin")
@@ -148,20 +146,19 @@ func (c *userFunctionClass) getFunction(ctx context.Context, args []Expression) 
 	if err := errors.Trace(c.verifyArgs(args)); err != nil {
 		return nil, err
 	}
-	bf := newBaseBuiltinFuncWithTp(args, ctx, tpString)
-	bf.foldable = false
+	bf := newBaseBuiltinFuncWithTp(ctx, args, types.ETString)
 	bf.tp.Flen = 64
-	sig := &builtinUserSig{baseStringBuiltinFunc{bf}}
-	return sig.setSelf(sig), nil
+	sig := &builtinUserSig{bf}
+	return sig, nil
 }
 
 type builtinUserSig struct {
-	baseStringBuiltinFunc
+	baseBuiltinFunc
 }
 
 // eval evals a builtinUserSig.
 // See https://dev.mysql.com/doc/refman/5.7/en/information-functions.html#function_user
-func (b *builtinUserSig) evalString(row []types.Datum) (string, bool, error) {
+func (b *builtinUserSig) evalString(row types.Row) (string, bool, error) {
 	data := b.ctx.GetSessionVars()
 	if data == nil || data.User == nil {
 		return "", true, errors.Errorf("Missing session variable when eval builtin")
@@ -178,18 +175,17 @@ func (c *connectionIDFunctionClass) getFunction(ctx context.Context, args []Expr
 	if err := errors.Trace(c.verifyArgs(args)); err != nil {
 		return nil, err
 	}
-	bf := newBaseBuiltinFuncWithTp(args, ctx, tpInt)
-	bf.foldable = false
+	bf := newBaseBuiltinFuncWithTp(ctx, args, types.ETInt)
 	bf.tp.Flag |= mysql.UnsignedFlag
-	sig := &builtinConnectionIDSig{baseIntBuiltinFunc{bf}}
-	return sig.setSelf(sig), nil
+	sig := &builtinConnectionIDSig{bf}
+	return sig, nil
 }
 
 type builtinConnectionIDSig struct {
-	baseIntBuiltinFunc
+	baseBuiltinFunc
 }
 
-func (b *builtinConnectionIDSig) evalInt(_ []types.Datum) (int64, bool, error) {
+func (b *builtinConnectionIDSig) evalInt(_ types.Row) (int64, bool, error) {
 	data := b.ctx.GetSessionVars()
 	if data == nil {
 		return 0, true, errors.Errorf("Missing session variable when evalue builtin")
@@ -206,40 +202,39 @@ func (c *lastInsertIDFunctionClass) getFunction(ctx context.Context, args []Expr
 		return nil, errors.Trace(err)
 	}
 
-	argsTp := []evalTp{}
+	argsTp := []types.EvalType{}
 	if len(args) == 1 {
-		argsTp = append(argsTp, tpInt)
+		argsTp = append(argsTp, types.ETInt)
 	}
-	bf := newBaseBuiltinFuncWithTp(args, ctx, tpInt, argsTp...)
+	bf := newBaseBuiltinFuncWithTp(ctx, args, types.ETInt, argsTp...)
 	bf.tp.Flag |= mysql.UnsignedFlag
-	bf.foldable = false
 
 	if len(args) == 1 {
-		sig = &builtinLastInsertIDWithIDSig{baseIntBuiltinFunc{bf}}
+		sig = &builtinLastInsertIDWithIDSig{bf}
 	} else {
-		sig = &builtinLastInsertIDSig{baseIntBuiltinFunc{bf}}
+		sig = &builtinLastInsertIDSig{bf}
 	}
-	return sig.setSelf(sig), errors.Trace(err)
+	return sig, errors.Trace(err)
 }
 
 type builtinLastInsertIDSig struct {
-	baseIntBuiltinFunc
+	baseBuiltinFunc
 }
 
 // evalInt evals LAST_INSERT_ID().
 // See https://dev.mysql.com/doc/refman/5.7/en/information-functions.html#function_last-insert-id.
-func (b *builtinLastInsertIDSig) evalInt(row []types.Datum) (res int64, isNull bool, err error) {
+func (b *builtinLastInsertIDSig) evalInt(row types.Row) (res int64, isNull bool, err error) {
 	res = int64(b.ctx.GetSessionVars().PrevLastInsertID)
 	return res, false, nil
 }
 
 type builtinLastInsertIDWithIDSig struct {
-	baseIntBuiltinFunc
+	baseBuiltinFunc
 }
 
 // evalInt evals LAST_INSERT_ID(expr).
 // See https://dev.mysql.com/doc/refman/5.7/en/information-functions.html#function_last-insert-id.
-func (b *builtinLastInsertIDWithIDSig) evalInt(row []types.Datum) (res int64, isNull bool, err error) {
+func (b *builtinLastInsertIDWithIDSig) evalInt(row types.Row) (res int64, isNull bool, err error) {
 	sc := b.getCtx().GetSessionVars().StmtCtx
 	res, isNull, err = b.args[0].EvalInt(row, sc)
 	if isNull || err != nil {
@@ -258,20 +253,19 @@ func (c *versionFunctionClass) getFunction(ctx context.Context, args []Expressio
 	if err := errors.Trace(c.verifyArgs(args)); err != nil {
 		return nil, err
 	}
-	bf := newBaseBuiltinFuncWithTp(args, ctx, tpString)
+	bf := newBaseBuiltinFuncWithTp(ctx, args, types.ETString)
 	bf.tp.Flen = 64
-	bf.foldable = false
-	sig := &builtinVersionSig{baseStringBuiltinFunc{bf}}
-	return sig.setSelf(sig), nil
+	sig := &builtinVersionSig{bf}
+	return sig, nil
 }
 
 type builtinVersionSig struct {
-	baseStringBuiltinFunc
+	baseBuiltinFunc
 }
 
 // evalString evals a builtinVersionSig.
 // See https://dev.mysql.com/doc/refman/5.7/en/information-functions.html#function_version
-func (b *builtinVersionSig) evalString(row []types.Datum) (string, bool, error) {
+func (b *builtinVersionSig) evalString(row types.Row) (string, bool, error) {
 	return mysql.ServerVersion, false, nil
 }
 
@@ -283,19 +277,19 @@ func (c *tidbVersionFunctionClass) getFunction(ctx context.Context, args []Expre
 	if err := c.verifyArgs(args); err != nil {
 		return nil, errors.Trace(err)
 	}
-	bf := newBaseBuiltinFuncWithTp(args, ctx, tpString)
+	bf := newBaseBuiltinFuncWithTp(ctx, args, types.ETString)
 	bf.tp.Flen = len(printer.GetTiDBInfo())
-	sig := &builtinTiDBVersionSig{baseStringBuiltinFunc{bf}}
-	return sig.setSelf(sig), nil
+	sig := &builtinTiDBVersionSig{bf}
+	return sig, nil
 }
 
 type builtinTiDBVersionSig struct {
-	baseStringBuiltinFunc
+	baseBuiltinFunc
 }
 
 // evalString evals a builtinTiDBVersionSig.
 // This will show git hash and build time for tidb-server.
-func (b *builtinTiDBVersionSig) evalString(_ []types.Datum) (string, bool, error) {
+func (b *builtinTiDBVersionSig) evalString(_ types.Row) (string, bool, error) {
 	return printer.GetTiDBInfo(), false, nil
 }
 
@@ -304,7 +298,7 @@ type benchmarkFunctionClass struct {
 }
 
 func (c *benchmarkFunctionClass) getFunction(ctx context.Context, args []Expression) (builtinFunc, error) {
-	return nil, errFunctionNotExists.GenByArgs("BENCHMARK")
+	return nil, errFunctionNotExists.GenByArgs("FUNCTION", "BENCHMARK")
 }
 
 type charsetFunctionClass struct {
@@ -312,7 +306,7 @@ type charsetFunctionClass struct {
 }
 
 func (c *charsetFunctionClass) getFunction(ctx context.Context, args []Expression) (builtinFunc, error) {
-	return nil, errFunctionNotExists.GenByArgs("CHARSET")
+	return nil, errFunctionNotExists.GenByArgs("FUNCTION", "CHARSET")
 }
 
 type coercibilityFunctionClass struct {
@@ -320,7 +314,7 @@ type coercibilityFunctionClass struct {
 }
 
 func (c *coercibilityFunctionClass) getFunction(ctx context.Context, args []Expression) (builtinFunc, error) {
-	return nil, errFunctionNotExists.GenByArgs("COERCIBILITY")
+	return nil, errFunctionNotExists.GenByArgs("FUNCTION", "COERCIBILITY")
 }
 
 type collationFunctionClass struct {
@@ -328,13 +322,29 @@ type collationFunctionClass struct {
 }
 
 func (c *collationFunctionClass) getFunction(ctx context.Context, args []Expression) (builtinFunc, error) {
-	return nil, errFunctionNotExists.GenByArgs("COLLATION")
+	return nil, errFunctionNotExists.GenByArgs("FUNCTION", "COLLATION")
 }
 
 type rowCountFunctionClass struct {
 	baseFunctionClass
 }
 
-func (c *rowCountFunctionClass) getFunction(ctx context.Context, args []Expression) (builtinFunc, error) {
-	return nil, errFunctionNotExists.GenByArgs("ROW_COUNT")
+func (c *rowCountFunctionClass) getFunction(ctx context.Context, args []Expression) (sig builtinFunc, err error) {
+	if err = c.verifyArgs(args); err != nil {
+		return nil, errors.Trace(err)
+	}
+	bf := newBaseBuiltinFuncWithTp(ctx, args, types.ETInt)
+	sig = &builtinRowCountSig{bf}
+	return sig, nil
+}
+
+type builtinRowCountSig struct {
+	baseBuiltinFunc
+}
+
+// evalInt evals ROW_COUNT().
+// See https://dev.mysql.com/doc/refman/5.7/en/information-functions.html#function_row-count.
+func (b *builtinRowCountSig) evalInt(_ types.Row) (res int64, isNull bool, err error) {
+	res = int64(b.ctx.GetSessionVars().PrevAffectedRows)
+	return res, false, nil
 }

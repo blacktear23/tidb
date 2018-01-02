@@ -18,8 +18,8 @@ import (
 	"github.com/pingcap/tidb/ast"
 	"github.com/pingcap/tidb/model"
 	"github.com/pingcap/tidb/mysql"
+	"github.com/pingcap/tidb/types"
 	"github.com/pingcap/tidb/util/testleak"
-	"github.com/pingcap/tidb/util/types"
 )
 
 func (s *testEvaluatorSuite) TestNewValuesFunc(c *C) {
@@ -42,14 +42,12 @@ func (s *testEvaluatorSuite) TestEvaluateExprWithNull(c *C) {
 
 	// ifnull(null, ifnull(col1, 1))
 	schema := &Schema{Columns: []*Column{col0}}
-	res, err := EvaluateExprWithNull(s.ctx, schema, ifnullOuter)
-	c.Assert(err, IsNil)
+	res := EvaluateExprWithNull(s.ctx, schema, ifnullOuter)
 	c.Assert(res.String(), Equals, "ifnull(<nil>, ifnull(col1, 1))")
 
 	schema.Columns = append(schema.Columns, col1)
 	// ifnull(null, ifnull(null, 1))
-	res, err = EvaluateExprWithNull(s.ctx, schema, ifnullOuter)
-	c.Assert(err, IsNil)
+	res = EvaluateExprWithNull(s.ctx, schema, ifnullOuter)
 	c.Assert(res.Equal(One, s.ctx), IsTrue)
 }
 
@@ -63,4 +61,20 @@ func (s *testEvaluatorSuite) TestConstant(c *C) {
 	res, err := Zero.MarshalJSON()
 	c.Assert(err, IsNil)
 	c.Assert(res, DeepEquals, []byte{0x22, 0x30, 0x22})
+}
+
+func (s *testEvaluatorSuite) TestIsHybridType(c *C) {
+	col := &Column{RetType: types.NewFieldType(mysql.TypeEnum)}
+	c.Assert(IsHybridType(col), IsTrue)
+	col.RetType.Tp = mysql.TypeSet
+	c.Assert(IsHybridType(col), IsTrue)
+	col.RetType.Tp = mysql.TypeBit
+	c.Assert(IsHybridType(col), IsTrue)
+	col.RetType.Tp = mysql.TypeDuration
+	c.Assert(IsHybridType(col), IsFalse)
+
+	con := &Constant{RetType: types.NewFieldType(mysql.TypeVarString), Value: types.NewBinaryLiteralDatum([]byte{byte(0), byte(1)})}
+	c.Assert(IsHybridType(con), IsTrue)
+	con.Value = types.NewIntDatum(1)
+	c.Assert(IsHybridType(con), IsFalse)
 }

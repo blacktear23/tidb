@@ -29,9 +29,9 @@ import (
 	"github.com/juju/errors"
 	"github.com/pingcap/tidb/context"
 	"github.com/pingcap/tidb/mysql"
+	"github.com/pingcap/tidb/types"
 	"github.com/pingcap/tidb/util/auth"
 	"github.com/pingcap/tidb/util/encrypt"
-	"github.com/pingcap/tidb/util/types"
 )
 
 var (
@@ -69,8 +69,7 @@ var (
 
 // TODO: support other mode
 const (
-	aes128ecb          string = "aes-128-ecb"
-	aes128ecbBlobkSize int    = 16
+	aes128ecbBlobkSize int = 16
 )
 
 type aesDecryptFunctionClass struct {
@@ -81,20 +80,20 @@ func (c *aesDecryptFunctionClass) getFunction(ctx context.Context, args []Expres
 	if err := c.verifyArgs(args); err != nil {
 		return nil, errors.Trace(c.verifyArgs(args))
 	}
-	bf := newBaseBuiltinFuncWithTp(args, ctx, tpString, tpString, tpString)
+	bf := newBaseBuiltinFuncWithTp(ctx, args, types.ETString, types.ETString, types.ETString)
 	bf.tp.Flen = args[0].GetType().Flen // At most.
 	types.SetBinChsClnFlag(bf.tp)
-	sig := &builtinAesDecryptSig{baseStringBuiltinFunc{bf}}
-	return sig.setSelf(sig), nil
+	sig := &builtinAesDecryptSig{bf}
+	return sig, nil
 }
 
 type builtinAesDecryptSig struct {
-	baseStringBuiltinFunc
+	baseBuiltinFunc
 }
 
 // evalString evals AES_DECRYPT(crypt_str, key_key).
 // See https://dev.mysql.com/doc/refman/5.7/en/encryption-functions.html#function_aes-decrypt
-func (b *builtinAesDecryptSig) evalString(row []types.Datum) (string, bool, error) {
+func (b *builtinAesDecryptSig) evalString(row types.Row) (string, bool, error) {
 	// According to doc: If either function argument is NULL, the function returns NULL.
 	cryptStr, isNull, err := b.args[0].EvalString(row, b.ctx.GetSessionVars().StmtCtx)
 	if isNull || err != nil {
@@ -123,20 +122,20 @@ func (c *aesEncryptFunctionClass) getFunction(ctx context.Context, args []Expres
 	if err := c.verifyArgs(args); err != nil {
 		return nil, errors.Trace(c.verifyArgs(args))
 	}
-	bf := newBaseBuiltinFuncWithTp(args, ctx, tpString, tpString, tpString)
+	bf := newBaseBuiltinFuncWithTp(ctx, args, types.ETString, types.ETString, types.ETString)
 	bf.tp.Flen = aes128ecbBlobkSize * (args[0].GetType().Flen/aes128ecbBlobkSize + 1) // At most.
 	types.SetBinChsClnFlag(bf.tp)
-	sig := &builtinAesEncryptSig{baseStringBuiltinFunc{bf}}
-	return sig.setSelf(sig), nil
+	sig := &builtinAesEncryptSig{bf}
+	return sig, nil
 }
 
 type builtinAesEncryptSig struct {
-	baseStringBuiltinFunc
+	baseBuiltinFunc
 }
 
 // evalString evals AES_ENCRYPT(str, key_str).
 // See https://dev.mysql.com/doc/refman/5.7/en/encryption-functions.html#function_aes-decrypt
-func (b *builtinAesEncryptSig) evalString(row []types.Datum) (string, bool, error) {
+func (b *builtinAesEncryptSig) evalString(row types.Row) (string, bool, error) {
 	// According to doc: If either function argument is NULL, the function returns NULL.
 	str, isNull, err := b.args[0].EvalString(row, b.ctx.GetSessionVars().StmtCtx)
 	if isNull || err != nil {
@@ -162,7 +161,7 @@ type decodeFunctionClass struct {
 }
 
 func (c *decodeFunctionClass) getFunction(ctx context.Context, args []Expression) (builtinFunc, error) {
-	return nil, errFunctionNotExists.GenByArgs("DECODE")
+	return nil, errFunctionNotExists.GenByArgs("FUNCTION", "DECODE")
 }
 
 type desDecryptFunctionClass struct {
@@ -170,7 +169,7 @@ type desDecryptFunctionClass struct {
 }
 
 func (c *desDecryptFunctionClass) getFunction(ctx context.Context, args []Expression) (builtinFunc, error) {
-	return nil, errFunctionNotExists.GenByArgs("DES_DECRYPT")
+	return nil, errFunctionNotExists.GenByArgs("FUNCTION", "DES_DECRYPT")
 }
 
 type desEncryptFunctionClass struct {
@@ -178,7 +177,7 @@ type desEncryptFunctionClass struct {
 }
 
 func (c *desEncryptFunctionClass) getFunction(ctx context.Context, args []Expression) (builtinFunc, error) {
-	return nil, errFunctionNotExists.GenByArgs("DES_ENCRYPT")
+	return nil, errFunctionNotExists.GenByArgs("FUNCTION", "DES_ENCRYPT")
 }
 
 type encodeFunctionClass struct {
@@ -186,7 +185,7 @@ type encodeFunctionClass struct {
 }
 
 func (c *encodeFunctionClass) getFunction(ctx context.Context, args []Expression) (builtinFunc, error) {
-	return nil, errFunctionNotExists.GenByArgs("ENCODE")
+	return nil, errFunctionNotExists.GenByArgs("FUNCTION", "ENCODE")
 }
 
 type encryptFunctionClass struct {
@@ -194,7 +193,7 @@ type encryptFunctionClass struct {
 }
 
 func (c *encryptFunctionClass) getFunction(ctx context.Context, args []Expression) (builtinFunc, error) {
-	return nil, errFunctionNotExists.GenByArgs("ENCRYPT")
+	return nil, errFunctionNotExists.GenByArgs("FUNCTION", "ENCRYPT")
 }
 
 type oldPasswordFunctionClass struct {
@@ -202,7 +201,7 @@ type oldPasswordFunctionClass struct {
 }
 
 func (c *oldPasswordFunctionClass) getFunction(ctx context.Context, args []Expression) (builtinFunc, error) {
-	return nil, errFunctionNotExists.GenByArgs("OLD_PASSWORD")
+	return nil, errFunctionNotExists.GenByArgs("FUNCTION", "OLD_PASSWORD")
 }
 
 type passwordFunctionClass struct {
@@ -213,23 +212,23 @@ func (c *passwordFunctionClass) getFunction(ctx context.Context, args []Expressi
 	if err := c.verifyArgs(args); err != nil {
 		return nil, errors.Trace(err)
 	}
-	bf := newBaseBuiltinFuncWithTp(args, ctx, tpString, tpString)
+	bf := newBaseBuiltinFuncWithTp(ctx, args, types.ETString, types.ETString)
 	bf.tp.Flen = mysql.PWDHashLen + 1
-	sig := &builtinPasswordSig{baseStringBuiltinFunc{bf}}
-	return sig.setSelf(sig), nil
+	sig := &builtinPasswordSig{bf}
+	return sig, nil
 }
 
 type builtinPasswordSig struct {
-	baseStringBuiltinFunc
+	baseBuiltinFunc
 }
 
 // evalString evals a builtinPasswordSig.
 // See https://dev.mysql.com/doc/refman/5.7/en/encryption-functions.html#function_password
-func (b *builtinPasswordSig) evalString(row []types.Datum) (d string, isNull bool, err error) {
+func (b *builtinPasswordSig) evalString(row types.Row) (d string, isNull bool, err error) {
 	sc := b.ctx.GetSessionVars().StmtCtx
 	pass, isNull, err := b.args[0].EvalString(row, sc)
 	if isNull || err != nil {
-		return "", false, errors.Trace(err)
+		return "", err != nil, errors.Trace(err)
 	}
 
 	if len(pass) == 0 {
@@ -247,20 +246,20 @@ func (c *randomBytesFunctionClass) getFunction(ctx context.Context, args []Expre
 	if err := c.verifyArgs(args); err != nil {
 		return nil, errors.Trace(err)
 	}
-	bf := newBaseBuiltinFuncWithTp(args, ctx, tpString, tpInt)
+	bf := newBaseBuiltinFuncWithTp(ctx, args, types.ETString, types.ETInt)
 	bf.tp.Flen = 1024 // Max allowed random bytes
 	types.SetBinChsClnFlag(bf.tp)
-	sig := &builtinRandomBytesSig{baseStringBuiltinFunc{bf}}
-	return sig.setSelf(sig), nil
+	sig := &builtinRandomBytesSig{bf}
+	return sig, nil
 }
 
 type builtinRandomBytesSig struct {
-	baseStringBuiltinFunc
+	baseBuiltinFunc
 }
 
 // evalString evals RANDOM_BYTES(len).
 // See https://dev.mysql.com/doc/refman/5.7/en/encryption-functions.html#function_random-bytes
-func (b *builtinRandomBytesSig) evalString(row []types.Datum) (string, bool, error) {
+func (b *builtinRandomBytesSig) evalString(row types.Row) (string, bool, error) {
 	len, isNull, err := b.args[0].EvalInt(row, b.ctx.GetSessionVars().StmtCtx)
 	if isNull || err != nil {
 		return "", true, errors.Trace(err)
@@ -270,7 +269,7 @@ func (b *builtinRandomBytesSig) evalString(row []types.Datum) (string, bool, err
 	}
 	buf := make([]byte, len)
 	if n, err := rand.Read(buf); err != nil {
-		return "", false, errors.Trace(err)
+		return "", true, errors.Trace(err)
 	} else if int64(n) != len {
 		return "", false, errors.New("fail to generate random bytes")
 	}
@@ -285,19 +284,19 @@ func (c *md5FunctionClass) getFunction(ctx context.Context, args []Expression) (
 	if err := c.verifyArgs(args); err != nil {
 		return nil, errors.Trace(err)
 	}
-	bf := newBaseBuiltinFuncWithTp(args, ctx, tpString, tpString)
+	bf := newBaseBuiltinFuncWithTp(ctx, args, types.ETString, types.ETString)
 	bf.tp.Flen = 32
-	sig := &builtinMD5Sig{baseStringBuiltinFunc{bf}}
-	return sig.setSelf(sig), nil
+	sig := &builtinMD5Sig{bf}
+	return sig, nil
 }
 
 type builtinMD5Sig struct {
-	baseStringBuiltinFunc
+	baseBuiltinFunc
 }
 
 // evalString evals a builtinMD5Sig.
 // See https://dev.mysql.com/doc/refman/5.7/en/encryption-functions.html#function_md5
-func (b *builtinMD5Sig) evalString(row []types.Datum) (string, bool, error) {
+func (b *builtinMD5Sig) evalString(row types.Row) (string, bool, error) {
 	arg, isNull, err := b.args[0].EvalString(row, b.ctx.GetSessionVars().StmtCtx)
 	if isNull || err != nil {
 		return "", isNull, errors.Trace(err)
@@ -315,26 +314,29 @@ func (c *sha1FunctionClass) getFunction(ctx context.Context, args []Expression) 
 	if err := c.verifyArgs(args); err != nil {
 		return nil, errors.Trace(err)
 	}
-	bf := newBaseBuiltinFuncWithTp(args, ctx, tpString, tpString)
+	bf := newBaseBuiltinFuncWithTp(ctx, args, types.ETString, types.ETString)
 	bf.tp.Flen = 40
-	sig := &builtinSHA1Sig{baseStringBuiltinFunc{bf}}
-	return sig.setSelf(sig), nil
+	sig := &builtinSHA1Sig{bf}
+	return sig, nil
 }
 
 type builtinSHA1Sig struct {
-	baseStringBuiltinFunc
+	baseBuiltinFunc
 }
 
 // evalString evals SHA1(str).
 // See https://dev.mysql.com/doc/refman/5.7/en/encryption-functions.html#function_sha1
 // The value is returned as a string of 40 hexadecimal digits, or NULL if the argument was NULL.
-func (b *builtinSHA1Sig) evalString(row []types.Datum) (string, bool, error) {
+func (b *builtinSHA1Sig) evalString(row types.Row) (string, bool, error) {
 	str, isNull, err := b.args[0].EvalString(row, b.ctx.GetSessionVars().StmtCtx)
 	if isNull || err != nil {
 		return "", isNull, errors.Trace(err)
 	}
 	hasher := sha1.New()
-	hasher.Write([]byte(str))
+	_, err = hasher.Write([]byte(str))
+	if err != nil {
+		return "", true, errors.Trace(err)
+	}
 	return fmt.Sprintf("%x", hasher.Sum(nil)), false, nil
 }
 
@@ -346,14 +348,14 @@ func (c *sha2FunctionClass) getFunction(ctx context.Context, args []Expression) 
 	if err := c.verifyArgs(args); err != nil {
 		return nil, errors.Trace(err)
 	}
-	bf := newBaseBuiltinFuncWithTp(args, ctx, tpString, tpString, tpInt)
+	bf := newBaseBuiltinFuncWithTp(ctx, args, types.ETString, types.ETString, types.ETInt)
 	bf.tp.Flen = 128 // sha512
-	sig := &builtinSHA2Sig{baseStringBuiltinFunc{bf}}
-	return sig.setSelf(sig), nil
+	sig := &builtinSHA2Sig{bf}
+	return sig, nil
 }
 
 type builtinSHA2Sig struct {
-	baseStringBuiltinFunc
+	baseBuiltinFunc
 }
 
 // Supported hash length of SHA-2 family
@@ -367,7 +369,7 @@ const (
 
 // evalString evals SHA2(str, hash_length).
 // See https://dev.mysql.com/doc/refman/5.7/en/encryption-functions.html#function_sha2
-func (b *builtinSHA2Sig) evalString(row []types.Datum) (string, bool, error) {
+func (b *builtinSHA2Sig) evalString(row types.Row) (string, bool, error) {
 	str, isNull, err := b.args[0].EvalString(row, b.ctx.GetSessionVars().StmtCtx)
 	if isNull || err != nil {
 		return "", isNull, errors.Trace(err)
@@ -391,7 +393,10 @@ func (b *builtinSHA2Sig) evalString(row []types.Datum) (string, bool, error) {
 		return "", true, nil
 	}
 
-	hasher.Write([]byte(str))
+	_, err = hasher.Write([]byte(str))
+	if err != nil {
+		return "", true, errors.Trace(err)
+	}
 	return fmt.Sprintf("%x", hasher.Sum(nil)), false, nil
 }
 
@@ -399,7 +404,7 @@ func (b *builtinSHA2Sig) evalString(row []types.Datum) (string, bool, error) {
 func deflate(data []byte) ([]byte, error) {
 	var buffer bytes.Buffer
 	w := zlib.NewWriter(&buffer)
-	if _, err := w.Write([]byte(data)); err != nil {
+	if _, err := w.Write(data); err != nil {
 		return nil, errors.Trace(err)
 	}
 	if err := w.Close(); err != nil {
@@ -416,11 +421,11 @@ func inflate(compressStr []byte) ([]byte, error) {
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
-	if _, err := io.Copy(&out, r); err != nil {
+	if _, err = io.Copy(&out, r); err != nil {
 		return nil, errors.Trace(err)
 	}
-	r.Close()
-	return out.Bytes(), nil
+	err = r.Close()
+	return out.Bytes(), errors.Trace(err)
 }
 
 type compressFunctionClass struct {
@@ -431,7 +436,7 @@ func (c *compressFunctionClass) getFunction(ctx context.Context, args []Expressi
 	if err := c.verifyArgs(args); err != nil {
 		return nil, errors.Trace(err)
 	}
-	bf := newBaseBuiltinFuncWithTp(args, ctx, tpString, tpString)
+	bf := newBaseBuiltinFuncWithTp(ctx, args, types.ETString, types.ETString)
 	srcLen := args[0].GetType().Flen
 	compressBound := srcLen + (srcLen >> 12) + (srcLen >> 14) + (srcLen >> 25) + 13
 	if compressBound > mysql.MaxBlobWidth {
@@ -439,17 +444,17 @@ func (c *compressFunctionClass) getFunction(ctx context.Context, args []Expressi
 	}
 	bf.tp.Flen = compressBound
 	types.SetBinChsClnFlag(bf.tp)
-	sig := &builtinCompressSig{baseStringBuiltinFunc{bf}}
-	return sig.setSelf(sig), nil
+	sig := &builtinCompressSig{bf}
+	return sig, nil
 }
 
 type builtinCompressSig struct {
-	baseStringBuiltinFunc
+	baseBuiltinFunc
 }
 
 // evalString evals COMPRESS(str).
 // See https://dev.mysql.com/doc/refman/5.7/en/encryption-functions.html#function_compress
-func (b *builtinCompressSig) evalString(row []types.Datum) (string, bool, error) {
+func (b *builtinCompressSig) evalString(row types.Row) (string, bool, error) {
 	str, isNull, err := b.args[0].EvalString(row, b.ctx.GetSessionVars().StmtCtx)
 	if isNull || err != nil {
 		return "", true, errors.Trace(err)
@@ -492,20 +497,20 @@ func (c *uncompressFunctionClass) getFunction(ctx context.Context, args []Expres
 	if err := c.verifyArgs(args); err != nil {
 		return nil, errors.Trace(err)
 	}
-	bf := newBaseBuiltinFuncWithTp(args, ctx, tpString, tpString)
+	bf := newBaseBuiltinFuncWithTp(ctx, args, types.ETString, types.ETString)
 	bf.tp.Flen = mysql.MaxBlobWidth
 	types.SetBinChsClnFlag(bf.tp)
-	sig := &builtinUncompressSig{baseStringBuiltinFunc{bf}}
-	return sig.setSelf(sig), nil
+	sig := &builtinUncompressSig{bf}
+	return sig, nil
 }
 
 type builtinUncompressSig struct {
-	baseStringBuiltinFunc
+	baseBuiltinFunc
 }
 
 // evalString evals UNCOMPRESS(compressed_string).
 // See https://dev.mysql.com/doc/refman/5.7/en/encryption-functions.html#function_uncompress
-func (b *builtinUncompressSig) evalString(row []types.Datum) (string, bool, error) {
+func (b *builtinUncompressSig) evalString(row types.Row) (string, bool, error) {
 	sc := b.ctx.GetSessionVars().StmtCtx
 	payload, isNull, err := b.args[0].EvalString(row, sc)
 	if isNull || err != nil {
@@ -535,19 +540,19 @@ func (c *uncompressedLengthFunctionClass) getFunction(ctx context.Context, args 
 	if err := c.verifyArgs(args); err != nil {
 		return nil, errors.Trace(err)
 	}
-	bf := newBaseBuiltinFuncWithTp(args, ctx, tpInt, tpString)
+	bf := newBaseBuiltinFuncWithTp(ctx, args, types.ETInt, types.ETString)
 	bf.tp.Flen = 10
-	sig := &builtinUncompressedLengthSig{baseIntBuiltinFunc{bf}}
-	return sig.setSelf(sig), nil
+	sig := &builtinUncompressedLengthSig{bf}
+	return sig, nil
 }
 
 type builtinUncompressedLengthSig struct {
-	baseIntBuiltinFunc
+	baseBuiltinFunc
 }
 
 // evalInt evals UNCOMPRESSED_LENGTH(str).
 // See https://dev.mysql.com/doc/refman/5.7/en/encryption-functions.html#function_uncompressed-length
-func (b *builtinUncompressedLengthSig) evalInt(row []types.Datum) (int64, bool, error) {
+func (b *builtinUncompressedLengthSig) evalInt(row types.Row) (int64, bool, error) {
 	sc := b.ctx.GetSessionVars().StmtCtx
 	payload, isNull, err := b.args[0].EvalString(row, sc)
 	if isNull || err != nil {
@@ -570,5 +575,5 @@ type validatePasswordStrengthFunctionClass struct {
 }
 
 func (c *validatePasswordStrengthFunctionClass) getFunction(ctx context.Context, args []Expression) (builtinFunc, error) {
-	return nil, errFunctionNotExists.GenByArgs("VALIDATE_PASSWORD_STRENGTH")
+	return nil, errFunctionNotExists.GenByArgs("FUNCTION", "VALIDATE_PASSWORD_STRENGTH")
 }

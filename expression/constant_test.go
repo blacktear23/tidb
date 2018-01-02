@@ -22,9 +22,9 @@ import (
 	"github.com/pingcap/tidb/ast"
 	"github.com/pingcap/tidb/model"
 	"github.com/pingcap/tidb/mysql"
+	"github.com/pingcap/tidb/types"
 	"github.com/pingcap/tidb/util/mock"
 	"github.com/pingcap/tidb/util/testleak"
-	"github.com/pingcap/tidb/util/types"
 )
 
 var _ = Suite(&testExpressionSuite{})
@@ -50,8 +50,7 @@ func newLonglong(value int64) *Constant {
 
 func newFunction(funcName string, args ...Expression) Expression {
 	typeLong := types.NewFieldType(mysql.TypeLonglong)
-	newFunc, _ := NewFunction(mock.NewContext(), funcName, typeLong, args...)
-	return newFunc
+	return NewFunctionInternal(mock.NewContext(), funcName, typeLong, args...)
 }
 
 func (*testExpressionSuite) TestConstantPropagation(c *C) {

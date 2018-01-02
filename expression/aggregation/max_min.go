@@ -14,12 +14,11 @@
 package aggregation
 
 import (
-	log "github.com/Sirupsen/logrus"
 	"github.com/juju/errors"
 	"github.com/pingcap/tidb/context"
 	"github.com/pingcap/tidb/expression"
-	"github.com/pingcap/tidb/sessionctx/variable"
-	"github.com/pingcap/tidb/util/types"
+	"github.com/pingcap/tidb/sessionctx/stmtctx"
+	"github.com/pingcap/tidb/types"
 )
 
 type maxMinFunction struct {
@@ -33,18 +32,13 @@ func (mmf *maxMinFunction) Clone() Aggregation {
 	for i, arg := range mmf.Args {
 		nf.Args[i] = arg.Clone()
 	}
-	nf.resultMapper = make(aggCtxMapper)
 	return &nf
 }
 
 // CalculateDefaultValue implements Aggregation interface.
 func (mmf *maxMinFunction) CalculateDefaultValue(schema *expression.Schema, ctx context.Context) (d types.Datum, valid bool) {
 	arg := mmf.Args[0]
-	result, err := expression.EvaluateExprWithNull(ctx, schema, arg)
-	if err != nil {
-		log.Warnf("Evaluate expr with null failed in function %s, err msg is %s", mmf, err.Error())
-		return d, false
-	}
+	result := expression.EvaluateExprWithNull(ctx, schema, arg)
 	if con, ok := result.(*expression.Constant); ok {
 		return con.Value, true
 	}
@@ -56,32 +50,18 @@ func (mmf *maxMinFunction) GetType() *types.FieldType {
 	return mmf.Args[0].GetType()
 }
 
-// GetGroupResult implements Aggregation interface.
-func (mmf *maxMinFunction) GetGroupResult(groupKey []byte) (d types.Datum) {
-	return mmf.getContext(groupKey).Value
+// GetResult implements Aggregation interface.
+func (mmf *maxMinFunction) GetResult(ctx *AggEvaluateContext) (d types.Datum) {
+	return ctx.Value
 }
 
 // GetPartialResult implements Aggregation interface.
-func (mmf *maxMinFunction) GetPartialResult(groupKey []byte) []types.Datum {
-	return []types.Datum{mmf.GetGroupResult(groupKey)}
-}
-
-// GetStreamResult implements Aggregation interface.
-func (mmf *maxMinFunction) GetStreamResult() (d types.Datum) {
-	if mmf.streamCtx == nil {
-		return
-	}
-	d = mmf.streamCtx.Value
-	mmf.streamCtx = nil
-	return
+func (mmf *maxMinFunction) GetPartialResult(ctx *AggEvaluateContext) []types.Datum {
+	return []types.Datum{mmf.GetResult(ctx)}
 }
 
 // Update implements Aggregation interface.
-func (mmf *maxMinFunction) Update(row []types.Datum, groupKey []byte, sc *variable.StatementContext) error {
-	ctx := mmf.getContext(groupKey)
-	if len(mmf.Args) != 1 {
-		return errors.New("Wrong number of args for AggFuncMaxMin")
-	}
+func (mmf *maxMinFunction) Update(ctx *AggEvaluateContext, sc *stmtctx.StatementContext, row types.Row) error {
 	a := mmf.Args[0]
 	value, err := a.Eval(row)
 	if err != nil {
@@ -94,35 +74,7 @@ func (mmf *maxMinFunction) Update(row []types.Datum, groupKey []byte, sc *variab
 		return nil
 	}
 	var c int
-	c, err = ctx.Value.CompareDatum(sc, value)
-	if err != nil {
-		return errors.Trace(err)
-	}
-	if (mmf.isMax && c == -1) || (!mmf.isMax && c == 1) {
-		ctx.Value = value
-	}
-	return nil
-}
-
-// StreamUpdate implements Aggregation interface.
-func (mmf *maxMinFunction) StreamUpdate(row []types.Datum, sc *variable.StatementContext) error {
-	ctx := mmf.getStreamedContext()
-	if len(mmf.Args) != 1 {
-		return errors.New("Wrong number of args for AggFuncMaxMin")
-	}
-	a := mmf.Args[0]
-	value, err := a.Eval(row)
-	if err != nil {
-		return errors.Trace(err)
-	}
-	if ctx.Value.IsNull() {
-		ctx.Value = value
-	}
-	if value.IsNull() {
-		return nil
-	}
-	var c int
-	c, err = ctx.Value.CompareDatum(sc, value)
+	c, err = ctx.Value.CompareDatum(sc, &value)
 	if err != nil {
 		return errors.Trace(err)
 	}

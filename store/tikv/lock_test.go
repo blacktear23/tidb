@@ -82,7 +82,7 @@ func (s *testLockSuite) putKV(c *C, key, value []byte) (uint64, uint64) {
 	c.Assert(err, IsNil)
 	err = txn.Set(key, value)
 	c.Assert(err, IsNil)
-	err = txn.Commit()
+	err = txn.Commit(goctx.Background())
 	c.Assert(err, IsNil)
 	return txn.StartTS(), txn.(*tikvTxn).commitTS
 }
@@ -138,6 +138,7 @@ func (s *testLockSuite) TestScanLockResolveWithBatchGet(c *C) {
 	c.Assert(err, IsNil)
 	snapshot := newTiKVSnapshot(s.store, ver)
 	m, err := snapshot.BatchGet(keys)
+	c.Assert(err, IsNil)
 	c.Assert(len(m), Equals, int('z'-'a'+1))
 	for ch := byte('a'); ch <= byte('z'); ch++ {
 		k := []byte{ch}
@@ -156,7 +157,7 @@ func (s *testLockSuite) TestCleanLock(c *C) {
 		err = txn.Set([]byte{ch}, []byte{ch + 1})
 		c.Assert(err, IsNil)
 	}
-	err = txn.Commit()
+	err = txn.Commit(goctx.Background())
 	c.Assert(err, IsNil)
 }
 

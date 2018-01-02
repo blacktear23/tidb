@@ -12,7 +12,7 @@ path_to_add := $(addsuffix /bin,$(subst :,/bin:,$(CURDIR)/_vendor:$(GOPATH)))
 export PATH := $(path_to_add):$(PATH)
 
 GO        := go
-GOBUILD   := GOPATH=$(CURDIR)/_vendor:$(GOPATH) CGO_ENABLED=0 $(GO) build
+GOBUILD   := GOPATH=$(CURDIR)/_vendor:$(GOPATH) CGO_ENABLED=0 $(GO) build $(BUILD_FLAG)
 GOTEST    := GOPATH=$(CURDIR)/_vendor:$(GOPATH) CGO_ENABLED=1 $(GO) test -p 3
 OVERALLS  := GOPATH=$(CURDIR)/_vendor:$(GOPATH) CGO_ENABLED=1 overalls
 GOVERALLS := goveralls
@@ -24,6 +24,10 @@ PACKAGES  := $$(go list ./...| grep -vE "vendor")
 FILES     := $$(find . -name "*.go" | grep -vE "vendor")
 TOPDIRS   := $$(ls -d */ | grep -vE "vendor")
 
+GOFAIL_ENABLE  := $$(find $$PWD/ -type d | grep -vE "(\.git|vendor)" | xargs gofail enable)
+GOFAIL_DISABLE := $$(find $$PWD/ -type d | grep -vE "(\.git|vendor)" | xargs gofail disable)
+
+LDFLAGS += -X "github.com/pingcap/tidb/mysql.TiDBReleaseVersion=$(shell git describe --tags --dirty)"
 LDFLAGS += -X "github.com/pingcap/tidb/util/printer.TiDBBuildTS=$(shell date -u '+%Y-%m-%d %I:%M:%S')"
 LDFLAGS += -X "github.com/pingcap/tidb/util/printer.TiDBGitHash=$(shell git rev-parse HEAD)"
 LDFLAGS += -X "github.com/pingcap/tidb/util/printer.TiDBGitBranch=$(shell git rev-parse --abbrev-ref HEAD)"
@@ -39,7 +43,7 @@ buildsucc:
 
 all: dev server benchkv
 
-dev: checklist parserlib build benchkv test check
+dev: checklist parserlib test check
 
 build:
 	$(GOBUILD)
@@ -68,7 +72,7 @@ parserlib: parser/parser.go
 parser/parser.go: parser/parser.y
 	make parser
 
-check:
+check: errcheck
 	go get github.com/golang/lint/golint
 
 	@echo "vet"
@@ -86,7 +90,7 @@ goword:
 
 errcheck:
 	go get github.com/kisielk/errcheck
-	errcheck -blank $(PACKAGES)
+	@ GOPATH=$(CURDIR)/_vendor:$(GOPATH) errcheck -blank $(PACKAGES) | grep -v "_test\.go" | awk '{print} END{if(NR>0) {exit 1}}'
 
 clean:
 	$(GO) clean -i ./...
@@ -101,32 +105,32 @@ todo:
 test: checklist gotest
 
 gotest: parserlib
+	go get github.com/coreos/gofail
+	@$(GOFAIL_ENABLE)
 ifeq ("$(TRAVIS_COVERAGE)", "1")
 	@echo "Running in TRAVIS_COVERAGE mode."
 	@export log_level=error; \
 	go get github.com/go-playground/overalls
 	go get github.com/mattn/goveralls
-	$(OVERALLS) -project=github.com/pingcap/tidb -covermode=count -ignore='.git,_vendor'
-	$(GOVERALLS) -service=travis-ci -coverprofile=overalls.coverprofile
+	$(OVERALLS) -project=github.com/pingcap/tidb -covermode=count -ignore='.git,_vendor' || { $(GOFAIL_DISABLE); exit 1; }
+	$(GOVERALLS) -service=travis-ci -coverprofile=overalls.coverprofile || { $(GOFAIL_DISABLE); exit 1; }
 else
 	@echo "Running in native mode."
 	@export log_level=error; \
-	$(GOTEST) -cover $(PACKAGES)
+	$(GOTEST) -cover $(PACKAGES) || { $(GOFAIL_DISABLE); exit 1; }
 endif
+	@$(GOFAIL_DISABLE)
 
 race: parserlib
 	@export log_level=debug; \
-	$(GOTEST) -race $(PACKAGES)
+	$(GOTEST) -check.exclude="TestFail" -race $(PACKAGES)
 
 leak: parserlib
 	@export log_level=debug; \
-	for dir in $(PACKAGES); do \
-		echo $$dir; \
-		$(GOTEST) -tags leak $$dir | awk 'END{if($$1=="FAIL") {exit 1}}' || exit 1; \
-	done;
+	$(GOTEST) -check.exclude="TestFail" -tags leak $(PACKAGES)
 
 tikv_integration_test: parserlib
-	$(GOTEST) ./store/tikv/. -with-tikv=true
+	$(GOTEST) -check.exclude="TestFail" ./store/tikv/. -with-tikv=true
 
 RACE_FLAG = 
 ifeq ("$(WITH_RACE)", "1")
@@ -167,3 +171,11 @@ endif
 
 checklist:
 	cat checklist.md
+
+gofail-enable:
+	# Converting gofail failpoints...
+	@$(GOFAIL_ENABLE)
+
+gofail-disable:
+	# Restoring gofail failpoints...
+	@$(GOFAIL_DISABLE)

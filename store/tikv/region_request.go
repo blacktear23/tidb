@@ -16,12 +16,12 @@ package tikv
 import (
 	"time"
 
-	log "github.com/Sirupsen/logrus"
 	"github.com/juju/errors"
 	"github.com/pingcap/kvproto/pkg/errorpb"
 	"github.com/pingcap/kvproto/pkg/kvrpcpb"
 	"github.com/pingcap/tidb/kv"
 	"github.com/pingcap/tidb/store/tikv/tikvrpc"
+	log "github.com/sirupsen/logrus"
 	goctx "golang.org/x/net/context"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
@@ -43,18 +43,17 @@ import (
 // errors, since region range have changed, the request may need to split, so we
 // simply return the error to caller.
 type RegionRequestSender struct {
-	regionCache    *RegionCache
-	client         Client
-	isolationLevel kvrpcpb.IsolationLevel
-	storeAddr      string
+	regionCache *RegionCache
+	client      Client
+	storeAddr   string
+	rpcError    error
 }
 
 // NewRegionRequestSender creates a new sender.
-func NewRegionRequestSender(regionCache *RegionCache, client Client, isolationLevel kvrpcpb.IsolationLevel) *RegionRequestSender {
+func NewRegionRequestSender(regionCache *RegionCache, client Client) *RegionRequestSender {
 	return &RegionRequestSender{
-		regionCache:    regionCache,
-		client:         client,
-		isolationLevel: isolationLevel,
+		regionCache: regionCache,
+		client:      client,
 	}
 }
 
@@ -76,7 +75,6 @@ func (s *RegionRequestSender) SendReq(bo *Backoffer, req *tikvrpc.Request, regio
 		}
 
 		s.storeAddr = ctx.Addr
-		ctx.KVCtx.IsolationLevel = s.isolationLevel
 		resp, retry, err := s.sendReqToRegion(bo, ctx, req, timeout)
 		if err != nil {
 			return nil, errors.Trace(err)
@@ -103,13 +101,14 @@ func (s *RegionRequestSender) SendReq(bo *Backoffer, req *tikvrpc.Request, regio
 }
 
 func (s *RegionRequestSender) sendReqToRegion(bo *Backoffer, ctx *RPCContext, req *tikvrpc.Request, timeout time.Duration) (resp *tikvrpc.Response, retry bool, err error) {
-	if e := tikvrpc.SetContext(req, ctx.KVCtx); e != nil {
+	if e := tikvrpc.SetContext(req, ctx.Meta, ctx.Peer); e != nil {
 		return nil, false, errors.Trace(e)
 	}
-	context, cancel := goctx.WithTimeout(bo.ctx, timeout)
+	context, cancel := goctx.WithTimeout(bo, timeout)
 	defer cancel()
 	resp, err = s.client.SendReq(context, ctx.Addr, req)
 	if err != nil {
+		s.rpcError = err
 		if e := s.onSendFail(bo, ctx, err); e != nil {
 			return nil, false, errors.Trace(e)
 		}
@@ -125,7 +124,7 @@ func (s *RegionRequestSender) onSendFail(bo *Backoffer, ctx *RPCContext, err err
 	}
 	if grpc.Code(errors.Cause(err)) == codes.Canceled {
 		select {
-		case <-bo.ctx.Done():
+		case <-bo.Done():
 			return errors.Trace(err)
 		default:
 			// If we don't cancel, but the error code is Canceled, it must be from grpc remote.
@@ -141,7 +140,7 @@ func (s *RegionRequestSender) onSendFail(bo *Backoffer, ctx *RPCContext, err err
 	// When a store is not available, the leader of related region should be elected quickly.
 	// TODO: the number of retry time should be limited:since region may be unavailable
 	// when some unrecoverable disaster happened.
-	err = bo.Backoff(boTiKVRPC, errors.Errorf("send tikv request error: %v, ctx: %s, try next peer later", err, ctx.KVCtx))
+	err = bo.Backoff(boTiKVRPC, errors.Errorf("send tikv request error: %v, ctx: %v, try next peer later", err, ctx))
 	return errors.Trace(err)
 }
 
@@ -149,10 +148,10 @@ func (s *RegionRequestSender) onRegionError(bo *Backoffer, ctx *RPCContext, regi
 	reportRegionError(regionErr)
 	if notLeader := regionErr.GetNotLeader(); notLeader != nil {
 		// Retry if error is `NotLeader`.
-		log.Debugf("tikv reports `NotLeader`: %s, ctx: %s, retry later", notLeader, ctx.KVCtx)
+		log.Debugf("tikv reports `NotLeader`: %s, ctx: %v, retry later", notLeader, ctx)
 		s.regionCache.UpdateLeader(ctx.Region, notLeader.GetLeader().GetStoreId())
 		if notLeader.GetLeader() == nil {
-			err = bo.Backoff(boRegionMiss, errors.Errorf("not leader: %v, ctx: %s", notLeader, ctx.KVCtx))
+			err = bo.Backoff(BoRegionMiss, errors.Errorf("not leader: %v, ctx: %v", notLeader, ctx))
 			if err != nil {
 				return false, errors.Trace(err)
 			}
@@ -162,35 +161,35 @@ func (s *RegionRequestSender) onRegionError(bo *Backoffer, ctx *RPCContext, regi
 
 	if storeNotMatch := regionErr.GetStoreNotMatch(); storeNotMatch != nil {
 		// store not match
-		log.Warnf("tikv reports `StoreNotMatch`: %s, ctx: %s, retry later", storeNotMatch, ctx.KVCtx)
+		log.Warnf("tikv reports `StoreNotMatch`: %s, ctx: %v, retry later", storeNotMatch, ctx)
 		s.regionCache.ClearStoreByID(ctx.GetStoreID())
 		return true, nil
 	}
 
 	if staleEpoch := regionErr.GetStaleEpoch(); staleEpoch != nil {
-		log.Debugf("tikv reports `StaleEpoch`, ctx: %s, retry later", ctx.KVCtx)
+		log.Debugf("tikv reports `StaleEpoch`, ctx: %v, retry later", ctx)
 		err = s.regionCache.OnRegionStale(ctx, staleEpoch.NewRegions)
 		return false, errors.Trace(err)
 	}
 	if regionErr.GetServerIsBusy() != nil {
-		log.Warnf("tikv reports `ServerIsBusy`, reason: %s, ctx: %s, retry later", regionErr.GetServerIsBusy().GetReason(), ctx.KVCtx)
-		err = bo.Backoff(boServerBusy, errors.Errorf("server is busy, ctx: %s", ctx.KVCtx))
+		log.Warnf("tikv reports `ServerIsBusy`, reason: %s, ctx: %v, retry later", regionErr.GetServerIsBusy().GetReason(), ctx)
+		err = bo.Backoff(boServerBusy, errors.Errorf("server is busy, ctx: %v", ctx))
 		if err != nil {
 			return false, errors.Trace(err)
 		}
 		return true, nil
 	}
 	if regionErr.GetStaleCommand() != nil {
-		log.Debugf("tikv reports `StaleCommand`, ctx: %s", ctx.KVCtx)
+		log.Debugf("tikv reports `StaleCommand`, ctx: %v", ctx)
 		return true, nil
 	}
 	if regionErr.GetRaftEntryTooLarge() != nil {
-		log.Warnf("tikv reports `RaftEntryTooLarge`, ctx: %s", ctx.KVCtx)
+		log.Warnf("tikv reports `RaftEntryTooLarge`, ctx: %v", ctx)
 		return false, errors.New(regionErr.String())
 	}
 	// For other errors, we only drop cache here.
 	// Because caller may need to re-split the request.
-	log.Debugf("tikv reports region error: %s, ctx: %s", regionErr, ctx.KVCtx)
+	log.Debugf("tikv reports region error: %s, ctx: %v", regionErr, ctx)
 	s.regionCache.DropRegion(ctx.Region)
 	return false, nil
 }

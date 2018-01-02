@@ -23,8 +23,8 @@ import (
 	"github.com/pingcap/tidb/ast"
 	"github.com/pingcap/tidb/context"
 	"github.com/pingcap/tidb/expression"
-	"github.com/pingcap/tidb/sessionctx/variable"
-	"github.com/pingcap/tidb/util/types"
+	"github.com/pingcap/tidb/sessionctx/stmtctx"
+	"github.com/pingcap/tidb/types"
 	tipb "github.com/pingcap/tipb/go-tipb"
 )
 
@@ -32,15 +32,13 @@ import (
 type Aggregation interface {
 	fmt.Stringer
 	json.Marshaler
+
 	// Update during executing.
-	Update(row []types.Datum, groupKey []byte, sc *variable.StatementContext) error
+	Update(ctx *AggEvaluateContext, sc *stmtctx.StatementContext, row types.Row) error
 
 	// GetPartialResult will called by coprocessor to get partial results. For avg function, partial results will return
 	// sum and count values at the same time.
-	GetPartialResult(groupKey []byte) []types.Datum
-
-	// StreamUpdate updates data using streaming algo.
-	StreamUpdate(row []types.Datum, sc *variable.StatementContext) error
+	GetPartialResult(ctx *AggEvaluateContext) []types.Datum
 
 	// SetMode sets aggFunctionMode for aggregate function.
 	SetMode(mode AggFunctionMode)
@@ -48,11 +46,8 @@ type Aggregation interface {
 	// GetMode gets aggFunctionMode from aggregate function.
 	GetMode() AggFunctionMode
 
-	// GetGroupResult will be called when all data have been processed.
-	GetGroupResult(groupKey []byte) types.Datum
-
-	// GetStreamResult gets a result using streaming agg.
-	GetStreamResult() types.Datum
+	// GetResult will be called when all data have been processed.
+	GetResult(ctx *AggEvaluateContext) types.Datum
 
 	// GetArgs stands for getting all arguments.
 	GetArgs() []expression.Expression
@@ -63,14 +58,11 @@ type Aggregation interface {
 	// SetArgs sets argument by index.
 	SetArgs(args []expression.Expression)
 
-	// Reset resets this aggregate function.
-	Reset()
+	// Create a new AggEvaluateContext for the aggregation function.
+	CreateContext() *AggEvaluateContext
 
 	// IsDistinct indicates if the aggregate function contains distinct attribute.
 	IsDistinct() bool
-
-	// SetContext sets the aggregate evaluation context.
-	SetContext(ctx map[string](*aggEvaluateContext))
 
 	// Equal checks whether two aggregation functions are equal.
 	Equal(agg Aggregation, ctx context.Context) bool
@@ -104,12 +96,18 @@ func NewAggFunction(funcType string, funcArgs []expression.Expression, distinct 
 		return &maxMinFunction{aggFunction: newAggFunc(tp, funcArgs, distinct), isMax: false}
 	case ast.AggFuncFirstRow:
 		return &firstRowFunction{aggFunction: newAggFunc(tp, funcArgs, distinct)}
+	case ast.AggFuncBitOr:
+		return &bitOrFunction{aggFunction: newAggFunc(tp, funcArgs, distinct)}
+	case ast.AggFuncBitXor:
+		return &bitXorFunction{aggFunction: newAggFunc(tp, funcArgs, distinct)}
+	case ast.AggFuncBitAnd:
+		return &bitAndFunction{aggFunction: newAggFunc(tp, funcArgs, distinct)}
 	}
 	return nil
 }
 
 // NewDistAggFunc creates new Aggregate function for mock tikv.
-func NewDistAggFunc(expr *tipb.Expr, fieldTps []*types.FieldType, sc *variable.StatementContext) (Aggregation, error) {
+func NewDistAggFunc(expr *tipb.Expr, fieldTps []*types.FieldType, sc *stmtctx.StatementContext) (Aggregation, error) {
 	args := make([]expression.Expression, 0, len(expr.Children))
 	for _, child := range expr.Children {
 		arg, err := expression.PBToExpr(child, fieldTps, sc)
@@ -133,20 +131,24 @@ func NewDistAggFunc(expr *tipb.Expr, fieldTps []*types.FieldType, sc *variable.S
 		return &maxMinFunction{aggFunction: newAggFunc(ast.AggFuncMin, args, false)}, nil
 	case tipb.ExprType_First:
 		return &firstRowFunction{aggFunction: newAggFunc(ast.AggFuncFirstRow, args, false)}, nil
+	case tipb.ExprType_Agg_BitOr:
+		return &bitOrFunction{aggFunction: newAggFunc(ast.AggFuncBitOr, args, false)}, nil
+	case tipb.ExprType_Agg_BitXor:
+		return &bitXorFunction{aggFunction: newAggFunc(ast.AggFuncBitXor, args, false)}, nil
+	case tipb.ExprType_Agg_BitAnd:
+		return &bitAndFunction{aggFunction: newAggFunc(ast.AggFuncBitAnd, args, false)}, nil
 	}
 	return nil, errors.Errorf("Unknown aggregate function type %v", expr.Tp)
 }
 
-// aggEvaluateContext is used to store intermediate result when calculating aggregate functions.
-type aggEvaluateContext struct {
+// AggEvaluateContext is used to store intermediate result when calculating aggregate functions.
+type AggEvaluateContext struct {
 	DistinctChecker *distinctChecker
 	Count           int64
 	Value           types.Datum
 	Buffer          *bytes.Buffer // Buffer is used for group_concat.
 	GotFirstRow     bool          // It will check if the agg has met the first row key.
 }
-
-type aggCtxMapper map[string]*aggEvaluateContext
 
 // AggFunctionMode stands for the aggregation function's mode.
 type AggFunctionMode int
@@ -159,13 +161,10 @@ const (
 )
 
 type aggFunction struct {
-	name         string
-	mode         AggFunctionMode
-	Args         []expression.Expression
-	Distinct     bool
-	resultMapper aggCtxMapper
-	streamCtx    *aggEvaluateContext
-	datumBuf     []types.Datum
+	name     string
+	mode     AggFunctionMode
+	Args     []expression.Expression
+	Distinct bool
 }
 
 // Equal implements Aggregation interface.
@@ -208,10 +207,9 @@ func (af *aggFunction) MarshalJSON() ([]byte, error) {
 
 func newAggFunc(name string, args []expression.Expression, dist bool) aggFunction {
 	return aggFunction{
-		name:         name,
-		Args:         args,
-		resultMapper: make(aggCtxMapper, 0),
-		Distinct:     dist,
+		name:     name,
+		Args:     args,
+		Distinct: dist,
 	}
 }
 
@@ -223,12 +221,6 @@ func (af *aggFunction) CalculateDefaultValue(schema *expression.Schema, ctx cont
 // IsDistinct implements Aggregation interface.
 func (af *aggFunction) IsDistinct() bool {
 	return af.Distinct
-}
-
-// Reset implements Aggregation interface.
-func (af *aggFunction) Reset() {
-	af.resultMapper = make(aggCtxMapper, 0)
-	af.streamCtx = nil
 }
 
 // GetName implements Aggregation interface.
@@ -256,62 +248,16 @@ func (af *aggFunction) SetArgs(args []expression.Expression) {
 	af.Args = args
 }
 
-func (af *aggFunction) getContext(groupKey []byte) *aggEvaluateContext {
-	ctx, ok := af.resultMapper[string(groupKey)]
-	if !ok {
-		ctx = &aggEvaluateContext{}
-		if af.Distinct {
-			ctx.DistinctChecker = createDistinctChecker()
-		}
-		af.resultMapper[string(groupKey)] = ctx
+// CreateContext implements Aggregation interface.
+func (af *aggFunction) CreateContext() *AggEvaluateContext {
+	ctx := &AggEvaluateContext{}
+	if af.Distinct {
+		ctx.DistinctChecker = createDistinctChecker()
 	}
 	return ctx
 }
 
-func (af *aggFunction) getStreamedContext() *aggEvaluateContext {
-	if af.streamCtx == nil {
-		af.streamCtx = &aggEvaluateContext{}
-		if af.Distinct {
-			af.streamCtx.DistinctChecker = createDistinctChecker()
-		}
-	}
-	return af.streamCtx
-}
-
-// SetContext implements Aggregation interface.
-func (af *aggFunction) SetContext(ctx map[string](*aggEvaluateContext)) {
-	af.resultMapper = ctx
-}
-
-func (af *aggFunction) updateSum(row []types.Datum, groupKey []byte, sc *variable.StatementContext) error {
-	ctx := af.getContext(groupKey)
-	a := af.Args[0]
-	value, err := a.Eval(row)
-	if err != nil {
-		return errors.Trace(err)
-	}
-	if value.IsNull() {
-		return nil
-	}
-	if af.Distinct {
-		d, err1 := ctx.DistinctChecker.Check([]types.Datum{value})
-		if err1 != nil {
-			return errors.Trace(err1)
-		}
-		if !d {
-			return nil
-		}
-	}
-	ctx.Value, err = calculateSum(sc, ctx.Value, value)
-	if err != nil {
-		return errors.Trace(err)
-	}
-	ctx.Count++
-	return nil
-}
-
-func (af *aggFunction) streamUpdateSum(row []types.Datum, sc *variable.StatementContext) error {
-	ctx := af.getStreamedContext()
+func (af *aggFunction) updateSum(ctx *AggEvaluateContext, sc *stmtctx.StatementContext, row types.Row) error {
 	a := af.Args[0]
 	value, err := a.Eval(row)
 	if err != nil {

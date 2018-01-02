@@ -20,15 +20,25 @@ import (
 	"sync/atomic"
 	"time"
 
-	log "github.com/Sirupsen/logrus"
 	"github.com/juju/errors"
 	"github.com/pingcap/tidb/mysql"
 	"github.com/pingcap/tidb/server"
+	"github.com/pingcap/tidb/terror"
 	"github.com/pingcap/tidb/util"
 	"github.com/pingcap/tidb/util/arena"
+	log "github.com/sirupsen/logrus"
+	// For MySQL X Protocol
+	_ "github.com/pingcap/tipb/go-mysqlx"
+	_ "github.com/pingcap/tipb/go-mysqlx/Connection"
+	_ "github.com/pingcap/tipb/go-mysqlx/Crud"
+	_ "github.com/pingcap/tipb/go-mysqlx/Datatypes"
+	_ "github.com/pingcap/tipb/go-mysqlx/Expect"
+	_ "github.com/pingcap/tipb/go-mysqlx/Expr"
+	_ "github.com/pingcap/tipb/go-mysqlx/Notice"
+	_ "github.com/pingcap/tipb/go-mysqlx/Resultset"
+	_ "github.com/pingcap/tipb/go-mysqlx/Session"
+	_ "github.com/pingcap/tipb/go-mysqlx/Sql"
 )
-
-const tokenLimit = 1000
 
 var (
 	baseConnID uint32
@@ -48,7 +58,7 @@ type Server struct {
 func NewServer(cfg *Config) (s *Server, err error) {
 	s = &Server{
 		cfg:               cfg,
-		concurrentLimiter: server.NewTokenLimiter(tokenLimit),
+		concurrentLimiter: server.NewTokenLimiter(cfg.TokenLimit),
 		rwlock:            &sync.RWMutex{},
 		stopListenerCh:    make(chan struct{}, 1),
 	}
@@ -69,7 +79,8 @@ func NewServer(cfg *Config) (s *Server, err error) {
 // Close closes the server.
 func (s *Server) Close() {
 	if s.listener != nil {
-		s.listener.Close()
+		err := s.listener.Close()
+		terror.Log(errors.Trace(err))
 		s.listener = nil
 	}
 }
@@ -88,7 +99,8 @@ func (s *Server) Run() error {
 			return errors.Trace(err)
 		}
 		if s.shouldStopListener() {
-			conn.Close()
+			err = conn.Close()
+			terror.Log(errors.Trace(err))
 			break
 		}
 		go s.onConn(conn)
@@ -115,7 +127,8 @@ func (s *Server) onConn(c net.Conn) {
 		// Some keep alive services will send request to TiDB and disconnect immediately.
 		// So we use info log level.
 		log.Infof("handshake error %s", errors.ErrorStack(err))
-		c.Close()
+		err := c.Close()
+		terror.Log(errors.Trace(err))
 		return
 	}
 	conn.Run()

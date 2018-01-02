@@ -14,24 +14,22 @@
 package ddl
 
 import (
-	"fmt"
 	"os"
 	"testing"
 	"time"
 
 	"github.com/coreos/etcd/clientv3"
 	. "github.com/pingcap/check"
-	"github.com/pingcap/pd/pkg/logutil"
 	"github.com/pingcap/tidb/ast"
 	"github.com/pingcap/tidb/context"
 	"github.com/pingcap/tidb/infoschema"
 	"github.com/pingcap/tidb/kv"
 	"github.com/pingcap/tidb/meta"
 	"github.com/pingcap/tidb/model"
-	"github.com/pingcap/tidb/store/localstore"
-	"github.com/pingcap/tidb/store/localstore/goleveldb"
+	"github.com/pingcap/tidb/store/tikv"
+	"github.com/pingcap/tidb/types"
+	"github.com/pingcap/tidb/util/logutil"
 	"github.com/pingcap/tidb/util/mock"
-	"github.com/pingcap/tidb/util/types"
 	goctx "golang.org/x/net/context"
 )
 
@@ -39,14 +37,14 @@ func TestT(t *testing.T) {
 	CustomVerboseFlag = true
 	logLevel := os.Getenv("log_level")
 	logutil.InitLogger(&logutil.LogConfig{
-		Level: logLevel,
+		Level:  logLevel,
+		Format: "highlight",
 	})
 	TestingT(t)
 }
 
 func testCreateStore(c *C, name string) kv.Storage {
-	driver := localstore.Driver{Driver: goleveldb.MemoryDriver{}}
-	store, err := driver.Open(fmt.Sprintf("memory://%s", name))
+	store, err := tikv.NewMockTikvStore()
 	c.Assert(err, IsNil)
 	return store
 }
@@ -89,7 +87,7 @@ func checkEqualTable(c *C, t1, t2 *model.TableInfo) {
 }
 
 func checkHistoryJob(c *C, job *model.Job) {
-	c.Assert(job.State, Equals, model.JobSynced)
+	c.Assert(job.State, Equals, model.JobStateSynced)
 }
 
 func checkHistoryJobArgs(c *C, ctx context.Context, id int64, args *historyJobArgs) {

@@ -15,16 +15,14 @@ package statistics
 
 import (
 	"github.com/juju/errors"
-	"github.com/pingcap/tidb/ast"
 	"github.com/pingcap/tidb/context"
-	"github.com/pingcap/tidb/sessionctx/variable"
-	"github.com/pingcap/tidb/util/codec"
-	"github.com/pingcap/tidb/util/types"
+	"github.com/pingcap/tidb/sessionctx/stmtctx"
+	"github.com/pingcap/tidb/types"
 )
 
 // SortedBuilder is used to build histograms for PK and index.
 type SortedBuilder struct {
-	sc              *variable.StatementContext
+	sc              *stmtctx.StatementContext
 	numBuckets      int64
 	valuesPerBucket int64
 	lastNumber      int64
@@ -34,7 +32,7 @@ type SortedBuilder struct {
 }
 
 // NewSortedBuilder creates a new SortedBuilder.
-func NewSortedBuilder(sc *variable.StatementContext, numBuckets, id int64) *SortedBuilder {
+func NewSortedBuilder(sc *stmtctx.StatementContext, numBuckets, id int64) *SortedBuilder {
 	return &SortedBuilder{
 		sc:              sc,
 		numBuckets:      numBuckets,
@@ -56,7 +54,7 @@ func (b *SortedBuilder) Hist() *Histogram {
 
 // Iterate updates the histogram incrementally.
 func (b *SortedBuilder) Iterate(data types.Datum) error {
-	cmp, err := b.hist.Buckets[b.bucketIdx].UpperBound.CompareDatum(b.sc, data)
+	cmp, err := b.hist.Buckets[b.bucketIdx].UpperBound.CompareDatum(b.sc, &data)
 	if err != nil {
 		return errors.Trace(err)
 	}
@@ -108,30 +106,6 @@ func (b *SortedBuilder) Iterate(data types.Datum) error {
 	return nil
 }
 
-// BuildIndex builds histogram for index.
-func BuildIndex(ctx context.Context, numBuckets, id int64, records ast.RecordSet) (int64, *Histogram, error) {
-	b := NewSortedBuilder(ctx.GetSessionVars().StmtCtx, numBuckets, id)
-	for {
-		row, err := records.Next()
-		if err != nil {
-			return 0, nil, errors.Trace(err)
-		}
-		if row == nil {
-			break
-		}
-		bytes, err := codec.EncodeKey(nil, row.Data...)
-		if err != nil {
-			return 0, nil, errors.Trace(err)
-		}
-		data := types.NewBytesDatum(bytes)
-		err = b.Iterate(data)
-		if err != nil {
-			return 0, nil, errors.Trace(err)
-		}
-	}
-	return b.Count, b.Hist(), nil
-}
-
 // BuildColumn builds histogram from samples for column.
 func BuildColumn(ctx context.Context, numBuckets, id int64, collector *SampleCollector) (*Histogram, error) {
 	count := collector.Count
@@ -144,9 +118,13 @@ func BuildColumn(ctx context.Context, numBuckets, id int64, collector *SampleCol
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
+	ndv := collector.FMSketch.NDV()
+	if ndv > count {
+		ndv = count
+	}
 	hg := &Histogram{
 		ID:        id,
-		NDV:       collector.Sketch.NDV(),
+		NDV:       ndv,
 		NullCount: collector.NullCount,
 		Buckets:   make([]Bucket, 1, numBuckets),
 	}
@@ -162,7 +140,7 @@ func BuildColumn(ctx context.Context, numBuckets, id int64, collector *SampleCol
 	var lastCount int64
 	hg.Buckets[0].LowerBound = samples[0]
 	for i := int64(0); i < int64(len(samples)); i++ {
-		cmp, err := hg.Buckets[bucketIdx].UpperBound.CompareDatum(sc, samples[i])
+		cmp, err := hg.Buckets[bucketIdx].UpperBound.CompareDatum(sc, &samples[i])
 		if err != nil {
 			return nil, errors.Trace(err)
 		}
@@ -201,6 +179,7 @@ func BuildColumn(ctx context.Context, numBuckets, id int64, collector *SampleCol
 type AnalyzeResult struct {
 	TableID int64
 	Hist    []*Histogram
+	Cms     []*CMSketch
 	Count   int64
 	IsIndex int
 	Err     error

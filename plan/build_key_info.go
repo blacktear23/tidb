@@ -22,7 +22,7 @@ import (
 
 type buildKeySolver struct{}
 
-func (s *buildKeySolver) optimize(lp LogicalPlan, _ context.Context, _ *idAllocator) (LogicalPlan, error) {
+func (s *buildKeySolver) optimize(lp LogicalPlan, _ context.Context) (LogicalPlan, error) {
 	lp.buildKeyInfo()
 	return lp, nil
 }
@@ -51,13 +51,13 @@ func (p *LogicalAggregation) buildKeyInfo() {
 		}
 	}
 	if len(p.GroupByItems) == 0 {
-		p.schema.MaxOneRow = true
+		p.maxOneRow = true
 	}
 }
 
 // If a condition is the form of (uniqueKey = constant) or (uniqueKey = Correlated column), it returns at most one row.
 // This function will check it.
-func (p *Selection) checkMaxOneRowCond(unique expression.Expression, constOrCorCol expression.Expression) bool {
+func (p *LogicalSelection) checkMaxOneRowCond(unique expression.Expression, constOrCorCol expression.Expression) bool {
 	col, ok := unique.(*expression.Column)
 	if !ok {
 		return false
@@ -73,22 +73,28 @@ func (p *Selection) checkMaxOneRowCond(unique expression.Expression, constOrCorC
 	return okCorCol
 }
 
-func (p *Selection) buildKeyInfo() {
+func (p *LogicalSelection) buildKeyInfo() {
 	p.baseLogicalPlan.buildKeyInfo()
-	p.schema.MaxOneRow = p.children[0].Schema().MaxOneRow
 	for _, cond := range p.Conditions {
 		if sf, ok := cond.(*expression.ScalarFunction); ok && sf.FuncName.L == ast.EQ {
 			if p.checkMaxOneRowCond(sf.GetArgs()[0], sf.GetArgs()[1]) || p.checkMaxOneRowCond(sf.GetArgs()[1], sf.GetArgs()[0]) {
-				p.schema.MaxOneRow = true
+				p.maxOneRow = true
 				break
 			}
 		}
 	}
 }
 
+func (p *LogicalLimit) buildKeyInfo() {
+	p.baseLogicalPlan.buildKeyInfo()
+	if p.Count == 1 {
+		p.maxOneRow = true
+	}
+}
+
 // A bijection exists between columns of a projection's schema and this projection's Exprs.
 // Sometimes we need a schema made by expr of Exprs to convert a column in child's schema to a column in this projection's Schema.
-func (p *Projection) buildSchemaByExprs() *expression.Schema {
+func (p *LogicalProjection) buildSchemaByExprs() *expression.Schema {
 	schema := expression.NewSchema(make([]*expression.Column, 0, p.schema.Len())...)
 	for _, expr := range p.Exprs {
 		if col, isCol := expr.(*expression.Column); isCol {
@@ -102,9 +108,8 @@ func (p *Projection) buildSchemaByExprs() *expression.Schema {
 	return schema
 }
 
-func (p *Projection) buildKeyInfo() {
+func (p *LogicalProjection) buildKeyInfo() {
 	p.baseLogicalPlan.buildKeyInfo()
-	p.schema.MaxOneRow = p.children[0].Schema().MaxOneRow
 	schema := p.buildSchemaByExprs()
 	for _, key := range p.Children()[0].Schema().Keys {
 		indices := schema.ColumnsIndices(key)
@@ -121,9 +126,9 @@ func (p *Projection) buildKeyInfo() {
 
 func (p *LogicalJoin) buildKeyInfo() {
 	p.baseLogicalPlan.buildKeyInfo()
-	p.schema.MaxOneRow = p.children[0].Schema().MaxOneRow && p.children[1].Schema().MaxOneRow
+	p.maxOneRow = p.children[0].(LogicalPlan).MaxOneRow() && p.children[1].(LogicalPlan).MaxOneRow()
 	switch p.JoinType {
-	case SemiJoin, LeftOuterSemiJoin:
+	case SemiJoin, LeftOuterSemiJoin, AntiSemiJoin, AntiLeftOuterSemiJoin:
 		p.schema.Keys = p.children[0].Schema().Clone().Keys
 	case InnerJoin, LeftOuterJoin, RightOuterJoin:
 		// If there is no equal conditions, then cartesian product can't be prevented and unique key information will destroy.
@@ -166,7 +171,7 @@ func (p *LogicalJoin) buildKeyInfo() {
 
 func (p *DataSource) buildKeyInfo() {
 	p.baseLogicalPlan.buildKeyInfo()
-	indices, _ := availableIndices(p.indexHints, p.tableInfo)
+	indices := p.availableIndices.indices
 	for _, idx := range indices {
 		if !idx.Unique {
 			continue

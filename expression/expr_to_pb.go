@@ -16,18 +16,20 @@ package expression
 import (
 	"time"
 
-	log "github.com/Sirupsen/logrus"
+	"github.com/juju/errors"
 	"github.com/pingcap/tidb/ast"
 	"github.com/pingcap/tidb/kv"
 	"github.com/pingcap/tidb/mysql"
-	"github.com/pingcap/tidb/sessionctx/variable"
+	"github.com/pingcap/tidb/sessionctx/stmtctx"
+	"github.com/pingcap/tidb/terror"
+	"github.com/pingcap/tidb/types"
 	"github.com/pingcap/tidb/util/codec"
-	"github.com/pingcap/tidb/util/types"
 	"github.com/pingcap/tipb/go-tipb"
+	log "github.com/sirupsen/logrus"
 )
 
 // ExpressionsToPB converts expression to tipb.Expr.
-func ExpressionsToPB(sc *variable.StatementContext, exprs []Expression, client kv.Client) (pbExpr *tipb.Expr, pushed []Expression, remained []Expression) {
+func ExpressionsToPB(sc *stmtctx.StatementContext, exprs []Expression, client kv.Client) (pbExpr *tipb.Expr, pushed []Expression, remained []Expression) {
 	pc := PbConverter{client: client, sc: sc}
 	for _, expr := range exprs {
 		v := pc.ExprToPB(expr)
@@ -42,14 +44,15 @@ func ExpressionsToPB(sc *variable.StatementContext, exprs []Expression, client k
 			// Merge multiple converted pb expression into a CNF.
 			pbExpr = &tipb.Expr{
 				Tp:       tipb.ExprType_And,
-				Children: []*tipb.Expr{pbExpr, v}}
+				Children: []*tipb.Expr{pbExpr, v},
+			}
 		}
 	}
 	return
 }
 
 // ExpressionsToPBList converts expressions to tipb.Expr list for new plan.
-func ExpressionsToPBList(sc *variable.StatementContext, exprs []Expression, client kv.Client) (pbExpr []*tipb.Expr) {
+func ExpressionsToPBList(sc *stmtctx.StatementContext, exprs []Expression, client kv.Client) (pbExpr []*tipb.Expr) {
 	pc := PbConverter{client: client, sc: sc}
 	for _, expr := range exprs {
 		v := pc.ExprToPB(expr)
@@ -61,11 +64,11 @@ func ExpressionsToPBList(sc *variable.StatementContext, exprs []Expression, clie
 // PbConverter supplys methods to convert TiDB expressions to TiPB.
 type PbConverter struct {
 	client kv.Client
-	sc     *variable.StatementContext
+	sc     *stmtctx.StatementContext
 }
 
 // NewPBConverter creates a PbConverter.
-func NewPBConverter(client kv.Client, sc *variable.StatementContext) PbConverter {
+func NewPBConverter(client kv.Client, sc *stmtctx.StatementContext) PbConverter {
 	return PbConverter{client: client, sc: sc}
 }
 
@@ -86,9 +89,13 @@ func (pc PbConverter) constantToPBExpr(con *Constant) *tipb.Expr {
 	var (
 		tp  tipb.ExprType
 		val []byte
-		d   = con.Value
 		ft  = con.GetType()
 	)
+	d, err := con.Eval(nil)
+	if err != nil {
+		log.Errorf("Fail to eval constant, err: %s", err.Error())
+		return nil
+	}
 
 	switch d.Kind() {
 	case types.KindNull:
@@ -123,7 +130,8 @@ func (pc PbConverter) constantToPBExpr(con *Constant) *tipb.Expr {
 			loc := pc.sc.TimeZone
 			t := d.GetMysqlTime()
 			if t.Type == mysql.TypeTimestamp && loc != time.UTC {
-				t.ConvertTimeZone(loc, time.UTC)
+				err := t.ConvertTimeZone(loc, time.UTC)
+				terror.Log(errors.Trace(err))
 			}
 			v, err := t.ToPackedUint()
 			if err != nil {
@@ -140,7 +148,7 @@ func (pc PbConverter) constantToPBExpr(con *Constant) *tipb.Expr {
 	if !pc.client.IsRequestTypeSupported(kv.ReqTypeSelect, int64(tp)) {
 		return nil
 	}
-	return &tipb.Expr{Tp: tp, Val: val}
+	return &tipb.Expr{Tp: tp, Val: val, FieldType: toPBFieldType(ft)}
 }
 
 func toPBFieldType(ft *types.FieldType) *tipb.FieldType {
@@ -149,6 +157,7 @@ func toPBFieldType(ft *types.FieldType) *tipb.FieldType {
 		Flag:    uint32(ft.Flag),
 		Flen:    int32(ft.Flen),
 		Decimal: int32(ft.Decimal),
+		Charset: ft.Charset,
 		Collate: collationToProto(ft.Collate),
 	}
 }
@@ -172,8 +181,9 @@ func (pc PbConverter) columnToPBExpr(column *Column) *tipb.Expr {
 
 	if pc.client.IsRequestTypeSupported(kv.ReqTypeDAG, kv.ReqSubTypeBasic) {
 		return &tipb.Expr{
-			Tp:  tipb.ExprType_ColumnRef,
-			Val: codec.EncodeInt(nil, int64(column.Index)),
+			Tp:        tipb.ExprType_ColumnRef,
+			Val:       codec.EncodeInt(nil, int64(column.Index)),
+			FieldType: toPBFieldType(column.RetType),
 		}
 	}
 	id := column.ID
@@ -190,20 +200,24 @@ func (pc PbConverter) columnToPBExpr(column *Column) *tipb.Expr {
 func (pc PbConverter) scalarFuncToPBExpr(expr *ScalarFunction) *tipb.Expr {
 	switch expr.FuncName.L {
 	case ast.LT, ast.LE, ast.EQ, ast.NE, ast.GE, ast.GT,
-		ast.NullEQ, ast.In, ast.Like:
+		ast.NullEQ:
 		return pc.compareOpsToPBExpr(expr)
+	case ast.Like:
+		return pc.likeToPBExpr(expr)
 	case ast.Plus, ast.Minus, ast.Mul, ast.Div:
 		return pc.arithmeticalOpsToPBExpr(expr)
 	case ast.LogicAnd, ast.LogicOr, ast.UnaryNot, ast.LogicXor:
 		return pc.logicalOpsToPBExpr(expr)
 	case ast.And, ast.Or, ast.BitNeg, ast.Xor:
 		return pc.bitwiseFuncToPBExpr(expr)
-	case ast.Case, ast.Coalesce, ast.If, ast.Ifnull, ast.IsNull:
+	case ast.Case, ast.Coalesce, ast.If, ast.Ifnull, ast.IsNull, ast.IsTruth, ast.IsFalsity, ast.In:
 		return pc.builtinFuncToPBExpr(expr)
 	case ast.JSONType, ast.JSONExtract, ast.JSONUnquote, ast.JSONValid,
 		ast.JSONObject, ast.JSONArray, ast.JSONMerge, ast.JSONSet,
 		ast.JSONInsert, ast.JSONReplace, ast.JSONRemove, ast.JSONContains:
 		return pc.jsonFuncToPBExpr(expr)
+	case ast.DateFormat:
+		return pc.dateFuncToPBExpr(expr)
 	default:
 		return nil
 	}
@@ -226,10 +240,6 @@ func (pc PbConverter) compareOpsToPBExpr(expr *ScalarFunction) *tipb.Expr {
 		tp = tipb.ExprType_GT
 	case ast.NullEQ:
 		tp = tipb.ExprType_NullEQ
-	case ast.In:
-		return pc.inToPBExpr(expr)
-	case ast.Like:
-		return pc.likeToPBExpr(expr)
 	}
 	return pc.convertToPBExpr(expr, tp)
 }
@@ -238,36 +248,7 @@ func (pc PbConverter) likeToPBExpr(expr *ScalarFunction) *tipb.Expr {
 	if !pc.client.IsRequestTypeSupported(kv.ReqTypeSelect, int64(tipb.ExprType_Like)) {
 		return nil
 	}
-	// Only patterns like 'abc', '%abc', 'abc%', '%abc%' can be converted to *tipb.Expr for now.
-	escape, ok := expr.GetArgs()[2].(*Constant)
-	if !ok || escape.Value.IsNull() || byte(escape.Value.GetInt64()) != '\\' {
-		return nil
-	}
-	pattern, ok := expr.GetArgs()[1].(*Constant)
-	if !ok || pattern.Value.Kind() != types.KindString {
-		return nil
-	}
-	for i, b := range pattern.Value.GetString() {
-		switch b {
-		case '\\', '_':
-			return nil
-		case '%':
-			if i != 0 && i != len(pattern.Value.GetString())-1 {
-				return nil
-			}
-		}
-	}
-	expr0 := pc.ExprToPB(expr.GetArgs()[0])
-	if expr0 == nil {
-		return nil
-	}
-	expr1 := pc.ExprToPB(expr.GetArgs()[1])
-	if expr1 == nil {
-		return nil
-	}
-	return &tipb.Expr{
-		Tp:       tipb.ExprType_Like,
-		Children: []*tipb.Expr{expr0, expr1}}
+	return pc.convertToPBExpr(expr, tipb.ExprType_Like)
 }
 
 func (pc PbConverter) arithmeticalOpsToPBExpr(expr *ScalarFunction) *tipb.Expr {
@@ -328,71 +309,17 @@ func (pc PbConverter) jsonFuncToPBExpr(expr *ScalarFunction) *tipb.Expr {
 	return pc.convertToPBExpr(expr, tp)
 }
 
-func (pc PbConverter) inToPBExpr(expr *ScalarFunction) *tipb.Expr {
-	if !pc.client.IsRequestTypeSupported(kv.ReqTypeSelect, int64(tipb.ExprType_In)) {
-		return nil
+func (pc PbConverter) dateFuncToPBExpr(expr *ScalarFunction) *tipb.Expr {
+	var tp tipb.ExprType
+	switch expr.FuncName.L {
+	case ast.DateFormat:
+		tp = tipb.ExprType_DateFormat
 	}
-
-	pbExpr := pc.ExprToPB(expr.GetArgs()[0])
-	if pbExpr == nil {
-		return nil
-	}
-	listExpr := pc.constListToPB(expr.GetArgs()[1:])
-	if listExpr == nil {
-		return nil
-	}
-	return &tipb.Expr{
-		Tp:       tipb.ExprType_In,
-		Children: []*tipb.Expr{pbExpr, listExpr}}
-}
-
-func (pc PbConverter) constListToPB(list []Expression) *tipb.Expr {
-	if !pc.client.IsRequestTypeSupported(kv.ReqTypeSelect, int64(tipb.ExprType_ValueList)) {
-		return nil
-	}
-
-	// Only list of *Constant can be push down.
-	datums := make([]types.Datum, 0, len(list))
-	for _, expr := range list {
-		v, ok := expr.(*Constant)
-		if !ok {
-			return nil
-		}
-		d := pc.constantToPBExpr(v)
-		if d == nil {
-			return nil
-		}
-		datums = append(datums, v.Value)
-	}
-	return pc.datumsToValueList(datums)
-}
-
-func (pc PbConverter) datumsToValueList(datums []types.Datum) *tipb.Expr {
-	// Don't push value list that has different datum kind.
-	prevKind := types.KindNull
-	for _, d := range datums {
-		if prevKind == types.KindNull {
-			prevKind = d.Kind()
-		}
-		if !d.IsNull() && d.Kind() != prevKind {
-			return nil
-		}
-	}
-	err := types.SortDatums(pc.sc, datums)
-	if err != nil {
-		log.Error(err.Error())
-		return nil
-	}
-	val, err := codec.EncodeValue(nil, datums...)
-	if err != nil {
-		log.Error(err.Error())
-		return nil
-	}
-	return &tipb.Expr{Tp: tipb.ExprType_ValueList, Val: val}
+	return pc.convertToPBExpr(expr, tp)
 }
 
 // GroupByItemToPB converts group by items to pb.
-func GroupByItemToPB(sc *variable.StatementContext, client kv.Client, expr Expression) *tipb.ByItem {
+func GroupByItemToPB(sc *stmtctx.StatementContext, client kv.Client, expr Expression) *tipb.ByItem {
 	pc := PbConverter{client: client, sc: sc}
 	e := pc.ExprToPB(expr)
 	if e == nil {
@@ -402,7 +329,7 @@ func GroupByItemToPB(sc *variable.StatementContext, client kv.Client, expr Expre
 }
 
 // SortByItemToPB converts order by items to pb.
-func SortByItemToPB(sc *variable.StatementContext, client kv.Client, expr Expression, desc bool) *tipb.ByItem {
+func SortByItemToPB(sc *stmtctx.StatementContext, client kv.Client, expr Expression, desc bool) *tipb.ByItem {
 	pc := PbConverter{client: client, sc: sc}
 	e := pc.ExprToPB(expr)
 	if e == nil {
@@ -415,7 +342,7 @@ func (pc PbConverter) builtinFuncToPBExpr(expr *ScalarFunction) *tipb.Expr {
 	switch expr.FuncName.L {
 	case ast.Case, ast.If, ast.Ifnull, ast.Nullif:
 		return pc.controlFuncsToPBExpr(expr)
-	case ast.Coalesce, ast.IsNull:
+	case ast.Coalesce, ast.IsNull, ast.In:
 		return pc.otherFuncsToPBExpr(expr)
 	default:
 		return nil
@@ -429,6 +356,8 @@ func (pc PbConverter) otherFuncsToPBExpr(expr *ScalarFunction) *tipb.Expr {
 		tp = tipb.ExprType_Coalesce
 	case ast.IsNull:
 		tp = tipb.ExprType_IsNull
+	case ast.In:
+		tp = tipb.ExprType_In
 	}
 	return pc.convertToPBExpr(expr, tp)
 }
@@ -465,6 +394,7 @@ func (pc PbConverter) convertToPBExpr(expr *ScalarFunction, tp tipb.ExprType) *t
 		if code > 0 {
 			return &tipb.Expr{Tp: tipb.ExprType_ScalarFunc, Sig: code, Children: children, FieldType: toPBFieldType(expr.RetType)}
 		}
+		return nil
 	}
 	return &tipb.Expr{Tp: tp, Children: children}
 }

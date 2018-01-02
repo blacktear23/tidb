@@ -90,7 +90,7 @@ func (s *Scanner) Errors() []error {
 
 // reset resets the sql string to be scanned.
 func (s *Scanner) reset(sql string) {
-	s.r = reader{s: sql}
+	s.r = reader{s: sql, p: Pos{Line: 1}}
 	s.buf.Reset()
 	s.errs = s.errs[:0]
 	s.stmtStartPos = 0
@@ -140,10 +140,18 @@ func (s *Scanner) Lex(v *yySymType) int {
 			tok = tok1
 		}
 	}
-	if (s.sqlMode&mysql.ModeANSIQuotes) > 0 &&
+	if s.sqlMode.HasANSIQuotesMode() &&
 		tok == stringLit &&
 		s.r.s[v.offset] == '"' {
 		tok = identifier
+	}
+
+	if tok == pipes && !(s.sqlMode.HasPipesAsConcatMode()) {
+		return pipesAsOr
+	}
+
+	if tok == not && s.sqlMode.HasHighNotPrecedenceMode() {
+		return not2
 	}
 
 	switch tok {
@@ -174,6 +182,11 @@ func (s *Scanner) Lex(v *yySymType) int {
 // SetSQLMode sets the SQL mode for scanner.
 func (s *Scanner) SetSQLMode(mode mysql.SQLMode) {
 	s.sqlMode = mode
+}
+
+// GetSQLMode return the SQL mode of scanner.
+func (s *Scanner) GetSQLMode() mysql.SQLMode {
+	return s.sqlMode
 }
 
 // NewScanner returns a new scanner object.
@@ -324,7 +337,8 @@ func startWithSlash(s *Scanner) (tok int, pos Pos, lit string) {
 		for {
 			ch0 = s.r.readByte()
 			if ch0 == unicode.ReplacementChar && s.r.eof() {
-				tok = unicode.ReplacementChar
+				// unclosed comment
+				s.errs = append(s.errs, ParseErrorWith(s.r.data(&pos), s.r.p.Line))
 				return
 			}
 			if ch0 == '*' && s.r.readByte() == '/' {
@@ -412,7 +426,7 @@ func startWithAt(s *Scanner) (tok int, pos Pos, lit string) {
 		s.r.incAsLongAs(isIdentChar)
 		tok, lit = doubleAtIdentifier, s.r.data(&pos)
 	} else {
-		tok = at
+		tok = int('@')
 	}
 	return
 }
@@ -508,7 +522,7 @@ func (s *Scanner) scanString() (tok int, pos Pos, lit string) {
 			}
 			str := mb.r.data(&pos)
 			mb.setUseBuf(str[1 : len(str)-1])
-		} else if ch0 == '\\' {
+		} else if ch0 == '\\' && !s.sqlMode.HasNoBackslashEscapesMode() {
 			mb.setUseBuf(mb.r.data(&pos)[1:])
 			ch0 = handleEscape(s)
 		}

@@ -24,9 +24,11 @@ import (
 	"github.com/pingcap/tidb/mysql"
 	"github.com/pingcap/tidb/privilege"
 	"github.com/pingcap/tidb/privilege/privileges"
+	"github.com/pingcap/tidb/store/tikv"
 	"github.com/pingcap/tidb/util/auth"
 	"github.com/pingcap/tidb/util/testleak"
 	"github.com/pingcap/tidb/util/testutil"
+	goctx "golang.org/x/net/context"
 )
 
 func TestT(t *testing.T) {
@@ -216,6 +218,19 @@ func (s *testPrivilegeSuite) TestShowGrants(c *C) {
 		`GRANT ALL PRIVILEGES ON test1.* TO 'show'@'localhost'`,
 		`GRANT Update ON test.test TO 'show'@'localhost'`}
 	c.Assert(testutil.CompareUnorderedStringSlice(gs, expected), IsTrue)
+
+	// Fix a issue that empty privileges is displayed when revoke after grant.
+	mustExec(c, se, "TRUNCATE TABLE mysql.db")
+	mustExec(c, se, "TRUNCATE TABLE mysql.user")
+	mustExec(c, se, "TRUNCATE TABLE mysql.tables_priv")
+	mustExec(c, se, "GRANT ALL PRIVILEGES ON `te%`.* TO 'show'@'localhost'")
+	mustExec(c, se, "REVOKE ALL PRIVILEGES ON `te%`.* FROM 'show'@'localhost'")
+	mustExec(c, se, `FLUSH PRIVILEGES;`)
+	gs, err = pc.ShowGrants(se, &auth.UserIdentity{Username: "show", Hostname: "localhost"})
+	c.Assert(err, IsNil)
+	// It should not be "GRANT ON `te%`.* to 'show'@'localhost'"
+	c.Assert(gs, HasLen, 0)
+
 }
 
 func (s *testPrivilegeSuite) TestDropTablePriv(c *C) {
@@ -232,7 +247,7 @@ func (s *testPrivilegeSuite) TestDropTablePriv(c *C) {
 	// ctx.GetSessionVars().User = "drop@localhost"
 	c.Assert(se.Auth(&auth.UserIdentity{Username: "drop", Hostname: "localhost"}, nil, nil), IsTrue)
 	mustExec(c, se, `SELECT * FROM todrop;`)
-	_, err := se.Execute("DROP TABLE todrop;")
+	_, err := se.Execute(goctx.Background(), "DROP TABLE todrop;")
 	c.Assert(err, NotNil)
 
 	se = newSession(c, s.store, s.dbName)
@@ -288,12 +303,14 @@ func (s *testPrivilegeSuite) TestInformationSchema(c *C) {
 }
 
 func mustExec(c *C, se tidb.Session, sql string) {
-	_, err := se.Execute(sql)
+	_, err := se.Execute(goctx.Background(), sql)
 	c.Assert(err, IsNil)
 }
 
 func newStore(c *C, dbPath string) kv.Storage {
-	store, err := tidb.NewStore("memory" + "://" + dbPath)
+	store, err := tikv.NewMockTikvStore()
+	tidb.SetSchemaLease(0)
+	tidb.SetStatsLease(0)
 	c.Assert(err, IsNil)
 	_, err = tidb.BootstrapSession(store)
 	c.Assert(err, IsNil)
@@ -301,7 +318,7 @@ func newStore(c *C, dbPath string) kv.Storage {
 }
 
 func newSession(c *C, store kv.Storage, dbName string) tidb.Session {
-	se, err := tidb.CreateSession(store)
+	se, err := tidb.CreateSession4Test(store)
 	c.Assert(err, IsNil)
 	mustExec(c, se, "create database if not exists "+dbName)
 	mustExec(c, se, "use "+dbName)

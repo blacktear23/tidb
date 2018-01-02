@@ -16,10 +16,10 @@ package expression
 import (
 	. "github.com/pingcap/check"
 	"github.com/pingcap/tidb/ast"
+	"github.com/pingcap/tidb/types"
+	"github.com/pingcap/tidb/types/json"
 	"github.com/pingcap/tidb/util/testleak"
 	"github.com/pingcap/tidb/util/testutil"
-	"github.com/pingcap/tidb/util/types"
-	"github.com/pingcap/tidb/util/types/json"
 )
 
 func (s *testEvaluatorSuite) TestJSONType(c *C) {
@@ -39,10 +39,9 @@ func (s *testEvaluatorSuite) TestJSONType(c *C) {
 	}
 	dtbl := tblToDtbl(tbl)
 	for _, t := range dtbl {
-		f, err := fc.getFunction(s.ctx, datumsToConstants(t["Input"]))
+		f, err := fc.getFunction(s.ctx, s.datumsToConstants(t["Input"]))
 		c.Assert(err, IsNil)
-		c.Assert(f.canBeFolded(), IsTrue)
-		d, err := f.eval(nil)
+		d, err := evalBuiltinFunc(f, nil)
 		c.Assert(err, IsNil)
 		c.Assert(d, testutil.DatumEquals, t["Expected"][0])
 	}
@@ -58,7 +57,7 @@ func (s *testEvaluatorSuite) TestJSONUnquote(c *C) {
 		{nil, nil},
 		{``, ``},
 		{`""`, ``},
-		{`''`, ``},
+		{`''`, `''`},
 		{`"a"`, `a`},
 		{`3`, `3`},
 		{`{"a": "b"}`, `{"a": "b"}`},
@@ -69,10 +68,9 @@ func (s *testEvaluatorSuite) TestJSONUnquote(c *C) {
 	}
 	dtbl := tblToDtbl(tbl)
 	for _, t := range dtbl {
-		f, err := fc.getFunction(s.ctx, datumsToConstants(t["Input"]))
+		f, err := fc.getFunction(s.ctx, s.datumsToConstants(t["Input"]))
 		c.Assert(err, IsNil)
-		c.Assert(f.canBeFolded(), IsTrue)
-		d, err := f.eval(nil)
+		d, err := evalBuiltinFunc(f, nil)
 		c.Assert(err, IsNil)
 		c.Assert(d, testutil.DatumEquals, t["Expected"][0])
 	}
@@ -93,20 +91,19 @@ func (s *testEvaluatorSuite) TestJSONExtract(c *C) {
 	}
 	for _, t := range tbl {
 		args := types.MakeDatums(t.Input...)
-		f, err := fc.getFunction(s.ctx, datumsToConstants(args))
+		f, err := fc.getFunction(s.ctx, s.datumsToConstants(args))
 		c.Assert(err, IsNil)
-		d, err := f.eval(nil)
+		d, err := evalBuiltinFunc(f, nil)
 		if t.Success {
 			c.Assert(err, IsNil)
-			c.Assert(f.canBeFolded(), IsTrue)
 			switch x := t.Expected.(type) {
 			case string:
-				var j1 json.JSON
-				j1, err = json.ParseFromString(x)
+				var j1 json.BinaryJSON
+				j1, err = json.ParseBinaryFromString(x)
 				c.Assert(err, IsNil)
 				j2 := d.GetMysqlJSON()
 				var cmp int
-				cmp, err = json.CompareJSON(j1, j2)
+				cmp = json.CompareBinary(j1, j2)
 				c.Assert(err, IsNil)
 				c.Assert(cmp, Equals, 0)
 			}
@@ -140,22 +137,20 @@ func (s *testEvaluatorSuite) TestJSONSetInsertReplace(c *C) {
 	var d types.Datum
 	for _, t := range tbl {
 		args := types.MakeDatums(t.Input...)
-		f, err = t.fc.getFunction(s.ctx, datumsToConstants(args))
+		f, err = t.fc.getFunction(s.ctx, s.datumsToConstants(args))
 		if t.BuildSuccess {
 			c.Assert(err, IsNil)
-			c.Assert(f.canBeFolded(), IsTrue)
-			d, err = f.eval(nil)
+			d, err = evalBuiltinFunc(f, nil)
 			if t.Success {
 				c.Assert(err, IsNil)
 				switch x := t.Expected.(type) {
 				case string:
-					var j1 json.JSON
-					j1, err = json.ParseFromString(x)
+					var j1 json.BinaryJSON
+					j1, err = json.ParseBinaryFromString(x)
 					c.Assert(err, IsNil)
 					j2 := d.GetMysqlJSON()
 					var cmp int
-					cmp, err = json.CompareJSON(j1, j2)
-					c.Assert(err, IsNil)
+					cmp = json.CompareBinary(j1, j2)
 					c.Assert(cmp, Equals, 0)
 				}
 				continue
@@ -178,20 +173,18 @@ func (s *testEvaluatorSuite) TestJSONMerge(c *C) {
 	}
 	for _, t := range tbl {
 		args := types.MakeDatums(t.Input...)
-		f, err := fc.getFunction(s.ctx, datumsToConstants(args))
+		f, err := fc.getFunction(s.ctx, s.datumsToConstants(args))
 		c.Assert(err, IsNil)
-		c.Assert(f.canBeFolded(), IsTrue)
-		d, err := f.eval(nil)
+		d, err := evalBuiltinFunc(f, nil)
 		c.Assert(err, IsNil)
 
 		switch x := t.Expected.(type) {
 		case string:
-			j1, err := json.ParseFromString(x)
+			j1, err := json.ParseBinaryFromString(x)
 			c.Assert(err, IsNil)
 			j2 := d.GetMysqlJSON()
-			cmp, err := json.CompareJSON(j1, j2)
-			c.Assert(err, IsNil)
-			c.Assert(cmp, Equals, 0)
+			cmp := json.CompareBinary(j1, j2)
+			c.Assert(cmp, Equals, 0, Commentf("got %v expect %v", j1.String(), j2.String()))
 		}
 	}
 }
@@ -208,17 +201,15 @@ func (s *testEvaluatorSuite) TestJSONArray(c *C) {
 	}
 	for _, t := range tbl {
 		args := types.MakeDatums(t.Input...)
-		f, err := fc.getFunction(s.ctx, datumsToConstants(args))
+		f, err := fc.getFunction(s.ctx, s.datumsToConstants(args))
 		c.Assert(err, IsNil)
-		c.Assert(f.canBeFolded(), IsTrue)
-		d, err := f.eval(nil)
+		d, err := evalBuiltinFunc(f, nil)
 		c.Assert(err, IsNil)
 
-		j1, err := json.ParseFromString(t.Expected)
+		j1, err := json.ParseBinaryFromString(t.Expected)
 		c.Assert(err, IsNil)
 		j2 := d.GetMysqlJSON()
-		cmp, err := json.CompareJSON(j1, j2)
-		c.Assert(err, IsNil)
+		cmp := json.CompareBinary(j1, j2)
 		c.Assert(cmp, Equals, 0)
 	}
 }
@@ -244,22 +235,20 @@ func (s *testEvaluatorSuite) TestJSONObject(c *C) {
 	var d types.Datum
 	for _, t := range tbl {
 		args := types.MakeDatums(t.Input...)
-		f, err = fc.getFunction(s.ctx, datumsToConstants(args))
+		f, err = fc.getFunction(s.ctx, s.datumsToConstants(args))
 		if t.BuildSuccess {
 			c.Assert(err, IsNil)
-			c.Assert(f.canBeFolded(), IsTrue)
-			d, err = f.eval(nil)
+			d, err = evalBuiltinFunc(f, nil)
 			if t.Success {
 				c.Assert(err, IsNil)
 				switch x := t.Expected.(type) {
 				case string:
-					var j1 json.JSON
-					j1, err = json.ParseFromString(x)
+					var j1 json.BinaryJSON
+					j1, err = json.ParseBinaryFromString(x)
 					c.Assert(err, IsNil)
 					j2 := d.GetMysqlJSON()
 					var cmp int
-					cmp, err = json.CompareJSON(j1, j2)
-					c.Assert(err, IsNil)
+					cmp = json.CompareBinary(j1, j2)
 					c.Assert(cmp, Equals, 0)
 				}
 				continue
@@ -297,22 +286,21 @@ func (s *testEvaluatorSuite) TestJSONORemove(c *C) {
 	}
 	for _, t := range tbl {
 		args := types.MakeDatums(t.Input...)
-		f, err := fc.getFunction(s.ctx, datumsToConstants(args))
+		f, err := fc.getFunction(s.ctx, s.datumsToConstants(args))
 		c.Assert(err, IsNil)
-		d, err := f.eval(nil)
+		d, err := evalBuiltinFunc(f, nil)
 
 		if t.Success {
 			c.Assert(err, IsNil)
 			switch x := t.Expected.(type) {
 			case string:
-				var j1 json.JSON
-				j1, err = json.ParseFromString(x)
+				var j1 json.BinaryJSON
+				j1, err = json.ParseBinaryFromString(x)
 				c.Assert(err, IsNil)
 				j2 := d.GetMysqlJSON()
 				var cmp int
-				cmp, err = json.CompareJSON(j1, j2)
-				c.Assert(err, IsNil)
-				c.Assert(cmp, Equals, 0)
+				cmp = json.CompareBinary(j1, j2)
+				c.Assert(cmp, Equals, 0, Commentf("got %v expect %v", j2.Value, j1.Value))
 			}
 		} else {
 			c.Assert(err, NotNil)

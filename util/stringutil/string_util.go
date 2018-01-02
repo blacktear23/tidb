@@ -14,7 +14,6 @@
 package stringutil
 
 import (
-	"bytes"
 	"strings"
 	"unicode/utf8"
 
@@ -189,14 +188,19 @@ func CompilePattern(pattern string, escape byte) (patChars, patTypes []byte) {
 
 const caseDiff = 'a' - 'A'
 
+// NOTE: Currently tikv's like function is case sensitive, so we keep its behavior here.
 func matchByteCI(a, b byte) bool {
-	if a == b {
-		return true
-	}
-	if a >= 'a' && a <= 'z' && a-caseDiff == b {
-		return true
-	}
-	return a >= 'A' && a <= 'Z' && a+caseDiff == b
+	return a == b
+	// We may reuse below code block when like function go back to case insensitive.
+	/*
+		if a == b {
+			return true
+		}
+		if a >= 'a' && a <= 'z' && a-caseDiff == b {
+			return true
+		}
+		return a >= 'A' && a <= 'Z' && a+caseDiff == b
+	*/
 }
 
 // DoMatch matches the string with patChars and patTypes.
@@ -229,18 +233,4 @@ func DoMatch(str string, patChars, patTypes []byte) bool {
 		}
 	}
 	return sIdx == len(str)
-}
-
-// RemoveBlanks removes all blanks, returns a new string.
-func RemoveBlanks(s string) string {
-	var buf = new(bytes.Buffer)
-	var cbuf [6]byte
-	for _, c := range s {
-		if c == rune(' ') || c == rune('\t') || c == rune('\r') || c == rune('\n') {
-			continue
-		}
-		len := utf8.EncodeRune(cbuf[0:], c)
-		buf.Write(cbuf[0:len])
-	}
-	return buf.String()
 }

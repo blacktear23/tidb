@@ -17,10 +17,10 @@ import (
 	"io"
 	"net"
 
-	log "github.com/Sirupsen/logrus"
 	"github.com/juju/errors"
 	"github.com/pingcap/tidb/terror"
 	"github.com/pingcap/tidb/util/arena"
+	log "github.com/sirupsen/logrus"
 )
 
 // clientConn represents a connection between server and client,
@@ -39,8 +39,12 @@ type clientConn struct {
 
 func (cc *clientConn) Run() {
 	defer func() {
-		recover()
-		cc.Close()
+		x := recover()
+		if x != nil {
+			log.Error(x)
+		}
+		err := cc.Close()
+		terror.Log(errors.Trace(err))
 	}()
 
 	for !cc.killed {

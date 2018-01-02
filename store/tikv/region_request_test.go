@@ -24,7 +24,8 @@ import (
 	"github.com/pingcap/kvproto/pkg/coprocessor"
 	"github.com/pingcap/kvproto/pkg/kvrpcpb"
 	"github.com/pingcap/kvproto/pkg/tikvpb"
-	"github.com/pingcap/tidb/store/tikv/mock-tikv"
+	"github.com/pingcap/tidb/config"
+	"github.com/pingcap/tidb/store/tikv/mocktikv"
 	"github.com/pingcap/tidb/store/tikv/tikvrpc"
 	goctx "golang.org/x/net/context"
 	"google.golang.org/grpc"
@@ -51,7 +52,7 @@ func (s *testRegionRequestSuite) SetUpTest(c *C) {
 	s.bo = NewBackoffer(1, goctx.Background())
 	s.mvccStore = mocktikv.NewMvccStore()
 	client := mocktikv.NewRPCClient(s.cluster, s.mvccStore)
-	s.regionRequestSender = NewRegionRequestSender(s.cache, client, kvrpcpb.IsolationLevel_SI)
+	s.regionRequestSender = NewRegionRequestSender(s.cache, client)
 }
 
 func (s *testRegionRequestSuite) TestOnSendFailedWithStoreRestart(c *C) {
@@ -223,6 +224,13 @@ func (s *mockTikvGrpcServer) MvccGetByKey(goctx.Context, *kvrpcpb.MvccGetByKeyRe
 func (s *mockTikvGrpcServer) MvccGetByStartTs(goctx.Context, *kvrpcpb.MvccGetByStartTsRequest) (*kvrpcpb.MvccGetByStartTsResponse, error) {
 	return nil, errors.New("unreachable")
 }
+func (s *mockTikvGrpcServer) SplitRegion(goctx.Context, *kvrpcpb.SplitRegionRequest) (*kvrpcpb.SplitRegionResponse, error) {
+	return nil, errors.New("unreachable")
+}
+
+func (s *mockTikvGrpcServer) CoprocessorStream(*coprocessor.Request, tikvpb.Tikv_CoprocessorStreamServer) error {
+	return errors.New("unreachable")
+}
 
 func (s *testRegionRequestSuite) TestNoReloadRegionForGrpcWhenCtxCanceled(c *C) {
 	// prepare a mock tikv grpc server
@@ -238,8 +246,8 @@ func (s *testRegionRequestSuite) TestNoReloadRegionForGrpcWhenCtxCanceled(c *C) 
 		wg.Done()
 	}()
 
-	client := newRPCClient()
-	sender := NewRegionRequestSender(s.cache, client, kvrpcpb.IsolationLevel_SI)
+	client := newRPCClient(config.Security{})
+	sender := NewRegionRequestSender(s.cache, client)
 	req := &tikvrpc.Request{
 		Type: tikvrpc.CmdRawPut,
 		RawPut: &kvrpcpb.RawPutRequest{
@@ -258,10 +266,10 @@ func (s *testRegionRequestSuite) TestNoReloadRegionForGrpcWhenCtxCanceled(c *C) 
 
 	// Just for covering error code = codes.Canceled.
 	client1 := &cancelContextClient{
-		Client:       newRPCClient(),
+		Client:       newRPCClient(config.Security{}),
 		redirectAddr: addr,
 	}
-	sender = NewRegionRequestSender(s.cache, client1, kvrpcpb.IsolationLevel_SI)
+	sender = NewRegionRequestSender(s.cache, client1)
 	sender.SendReq(s.bo, req, region.Region, 3*time.Second)
 
 	// cleanup

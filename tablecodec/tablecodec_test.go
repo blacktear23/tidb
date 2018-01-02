@@ -20,10 +20,10 @@ import (
 
 	. "github.com/pingcap/check"
 	"github.com/pingcap/tidb/mysql"
-	"github.com/pingcap/tidb/sessionctx/variable"
+	"github.com/pingcap/tidb/sessionctx/stmtctx"
+	"github.com/pingcap/tidb/types"
 	"github.com/pingcap/tidb/util/codec"
 	"github.com/pingcap/tidb/util/testleak"
-	"github.com/pingcap/tidb/util/types"
 )
 
 func TestT(t *testing.T) {
@@ -85,12 +85,12 @@ func (s *testTableCodecSuite) TestRowCodec(c *C) {
 	c.Assert(err, IsNil)
 	c.Assert(r, NotNil)
 	c.Assert(r, HasLen, 3)
-	sc := new(variable.StatementContext)
+	sc := new(stmtctx.StatementContext)
 	// Compare decoded row and original row
 	for i, col := range cols {
 		v, ok := r[col.id]
 		c.Assert(ok, IsTrue)
-		equal, err1 := v.CompareDatum(sc, row[i])
+		equal, err1 := v.CompareDatum(sc, &row[i])
 		c.Assert(err1, IsNil)
 		c.Assert(equal, Equals, 0)
 	}
@@ -104,7 +104,7 @@ func (s *testTableCodecSuite) TestRowCodec(c *C) {
 	for i, col := range cols {
 		v, ok := r[col.id]
 		c.Assert(ok, IsTrue)
-		equal, err1 := v.CompareDatum(sc, row[i])
+		equal, err1 := v.CompareDatum(sc, &row[i])
 		c.Assert(err1, IsNil)
 		c.Assert(equal, Equals, 0)
 	}
@@ -122,7 +122,7 @@ func (s *testTableCodecSuite) TestRowCodec(c *C) {
 		}
 		v, ok := r[col.id]
 		c.Assert(ok, IsTrue)
-		equal, err1 := v.CompareDatum(sc, row[i])
+		equal, err1 := v.CompareDatum(sc, &row[i])
 		c.Assert(err1, IsNil)
 		c.Assert(equal, Equals, 0)
 	}
@@ -150,7 +150,7 @@ func (s *testTableCodecSuite) TestTimeCodec(c *C) {
 	row := make([]types.Datum, colLen)
 	row[0] = types.NewIntDatum(100)
 	row[1] = types.NewBytesDatum([]byte("abc"))
-	ts, err := types.ParseTimestamp("2016-06-23 11:30:45")
+	ts, err := types.ParseTimestamp(nil, "2016-06-23 11:30:45")
 	c.Assert(err, IsNil)
 	row[2] = types.NewDatum(ts)
 	du, err := types.ParseDuration("12:59:59.999999", 6)
@@ -175,12 +175,12 @@ func (s *testTableCodecSuite) TestTimeCodec(c *C) {
 	c.Assert(err, IsNil)
 	c.Assert(r, NotNil)
 	c.Assert(r, HasLen, colLen)
-	sc := new(variable.StatementContext)
+	sc := new(stmtctx.StatementContext)
 	// Compare decoded row and original row
 	for i, col := range cols {
 		v, ok := r[col.id]
 		c.Assert(ok, IsTrue)
-		equal, err1 := v.CompareDatum(sc, row[i])
+		equal, err1 := v.CompareDatum(sc, &row[i])
 		c.Assert(err1, IsNil)
 		c.Assert(equal, Equals, 0)
 	}
@@ -292,4 +292,31 @@ func (s *testTableCodecSuite) TestRecordKey(c *C) {
 	c.Assert(err, IsNil)
 	c.Assert(tTableID, Equals, tableID)
 	c.Assert(isRecordKey, IsTrue)
+}
+
+func (s *testTableCodecSuite) TestReplaceRecordKeyTableID(c *C) {
+	tableID := int64(1)
+	tableKey := EncodeRowKeyWithHandle(tableID, 1)
+	tTableID, _, _, err := DecodeKeyHead(tableKey)
+	c.Assert(err, IsNil)
+	c.Assert(tTableID, Equals, tableID)
+
+	tableID = 2
+	tableKey = ReplaceRecordKeyTableID(tableKey, tableID)
+	tTableID, _, _, err = DecodeKeyHead(tableKey)
+	c.Assert(err, IsNil)
+	c.Assert(tTableID, Equals, tableID)
+
+	tableID = 3
+	ReplaceRecordKeyTableID(tableKey, tableID)
+	tableKey = ReplaceRecordKeyTableID(tableKey, tableID)
+	tTableID, _, _, err = DecodeKeyHead(tableKey)
+	c.Assert(err, IsNil)
+	c.Assert(tTableID, Equals, tableID)
+
+	tableID = -1
+	tableKey = ReplaceRecordKeyTableID(tableKey, tableID)
+	tTableID, _, _, err = DecodeKeyHead(tableKey)
+	c.Assert(err, IsNil)
+	c.Assert(tTableID, Equals, tableID)
 }

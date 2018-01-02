@@ -21,8 +21,8 @@ import (
 	"github.com/pingcap/tidb/mysql"
 	"github.com/pingcap/tidb/sessionctx/variable"
 	"github.com/pingcap/tidb/terror"
+	"github.com/pingcap/tidb/types"
 	"github.com/pingcap/tidb/util/testleak"
-	"github.com/pingcap/tidb/util/types"
 )
 
 func TestT(t *testing.T) {
@@ -135,6 +135,11 @@ func (s *testVarsutilSuite) TestVarsutil(c *C) {
 	// Test case for sql mode.
 	for str, mode := range mysql.Str2SQLMode {
 		SetSessionSystemVar(v, "sql_mode", types.NewStringDatum(str))
+		if modeParts, exists := mysql.CombinationSQLMode[str]; exists {
+			for _, part := range modeParts {
+				mode |= mysql.Str2SQLMode[part]
+			}
+		}
 		c.Assert(v.SQLMode, Equals, mode)
 	}
 
@@ -152,10 +157,9 @@ func (s *testVarsutilSuite) TestVarsutil(c *C) {
 	SetSessionSystemVar(v, variable.TiDBBatchInsert, types.NewStringDatum("1"))
 	c.Assert(v.BatchInsert, IsTrue)
 
-	//Test case for tidb_max_row_count_for_inlj.
-	c.Assert(v.MaxRowCountForINLJ, Equals, 128)
-	SetSessionSystemVar(v, variable.TiDBMaxRowCountForINLJ, types.NewStringDatum("127"))
-	c.Assert(v.MaxRowCountForINLJ, Equals, 127)
+	c.Assert(v.MaxChunkSize, Equals, 1024)
+	SetSessionSystemVar(v, variable.TiDBMaxChunkSize, types.NewStringDatum("2"))
+	c.Assert(v.MaxChunkSize, Equals, 2)
 }
 
 type mockGlobalAccessor struct {
@@ -179,4 +183,8 @@ func (m *mockGlobalAccessor) GetGlobalSysVar(name string) (string, error) {
 func (m *mockGlobalAccessor) SetGlobalSysVar(name string, value string) error {
 	m.vars[name] = value
 	return nil
+}
+
+func (m *mockGlobalAccessor) GetAllSysVars() (map[string]string, error) {
+	return m.vars, nil
 }

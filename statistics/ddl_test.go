@@ -16,9 +16,9 @@ package statistics_test
 import (
 	. "github.com/pingcap/check"
 	"github.com/pingcap/tidb/model"
-	"github.com/pingcap/tidb/sessionctx/variable"
+	"github.com/pingcap/tidb/sessionctx/stmtctx"
+	"github.com/pingcap/tidb/types"
 	"github.com/pingcap/tidb/util/testkit"
-	"github.com/pingcap/tidb/util/types"
 )
 
 func (s *testStatsCacheSuite) TestDDLAfterLoad(c *C) {
@@ -48,11 +48,11 @@ func (s *testStatsCacheSuite) TestDDLAfterLoad(c *C) {
 	c.Assert(err, IsNil)
 	tableInfo = tbl.Meta()
 
-	sc := new(variable.StatementContext)
-	count, err := statsTbl.ColumnGreaterRowCount(sc, types.NewDatum(recordCount+1), tableInfo.Columns[0])
+	sc := new(stmtctx.StatementContext)
+	count, err := statsTbl.ColumnGreaterRowCount(sc, types.NewDatum(recordCount+1), tableInfo.Columns[0].ID)
 	c.Assert(err, IsNil)
 	c.Assert(count, Equals, 0.0)
-	count, err = statsTbl.ColumnGreaterRowCount(sc, types.NewDatum(recordCount+1), tableInfo.Columns[2])
+	count, err = statsTbl.ColumnGreaterRowCount(sc, types.NewDatum(recordCount+1), tableInfo.Columns[2].ID)
 	c.Assert(err, IsNil)
 	c.Assert(int(count), Equals, 333)
 }
@@ -123,8 +123,9 @@ func (s *testStatsCacheSuite) TestDDLHistogram(c *C) {
 	tableInfo := tbl.Meta()
 	statsTbl := do.StatsHandle().GetTableStats(tableInfo.ID)
 	c.Assert(statsTbl.Pseudo, IsFalse)
-	sc := new(variable.StatementContext)
-	c.Assert(statsTbl.ColumnIsInvalid(tableInfo.Columns[2]), IsTrue)
+	sc := new(stmtctx.StatementContext)
+	c.Assert(statsTbl.ColumnIsInvalid(sc, tableInfo.Columns[2].ID), IsTrue)
+	c.Check(statsTbl.Columns[tableInfo.Columns[2].ID].NDV, Equals, int64(0))
 
 	testKit.MustExec("alter table t add column c3 int NOT NULL")
 	err = h.HandleDDLEvent(<-h.DDLEventCh())
@@ -136,11 +137,11 @@ func (s *testStatsCacheSuite) TestDDLHistogram(c *C) {
 	tableInfo = tbl.Meta()
 	statsTbl = do.StatsHandle().GetTableStats(tableInfo.ID)
 	c.Assert(statsTbl.Pseudo, IsFalse)
-	sc = new(variable.StatementContext)
-	count, err := statsTbl.ColumnEqualRowCount(sc, types.NewIntDatum(0), tableInfo.Columns[3])
+	sc = new(stmtctx.StatementContext)
+	count, err := statsTbl.ColumnEqualRowCount(sc, types.NewIntDatum(0), tableInfo.Columns[3].ID)
 	c.Assert(err, IsNil)
 	c.Assert(count, Equals, float64(2))
-	count, err = statsTbl.ColumnEqualRowCount(sc, types.NewIntDatum(1), tableInfo.Columns[3])
+	count, err = statsTbl.ColumnEqualRowCount(sc, types.NewIntDatum(1), tableInfo.Columns[3].ID)
 	c.Assert(err, IsNil)
 	c.Assert(count, Equals, float64(0))
 

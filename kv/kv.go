@@ -38,6 +38,10 @@ const (
 	IsolationLevel
 	// Priority marks the priority of this transaction.
 	Priority
+	// NotFillCache makes this request do not touch the LRU cache of the underlying storage.
+	NotFillCache
+	// SyncLog decides whether the WAL(write-ahead log) of this request should be synchronized.
+	SyncLog
 )
 
 // Priority value for transaction priority.
@@ -112,7 +116,7 @@ type MemBuffer interface {
 type Transaction interface {
 	MemBuffer
 	// Commit commits the transaction operations to KV store.
-	Commit() error
+	Commit(goctx.Context) error
 	// Rollback undoes the transaction operations to KV store.
 	Rollback() error
 	// String implements fmt.Stringer interface.
@@ -131,6 +135,8 @@ type Transaction interface {
 	// Valid returns if the transaction is valid.
 	// A transaction become invalid after commit or rollback.
 	Valid() bool
+	// GetMemBuffer return the MemBuffer binding to this transaction.
+	GetMemBuffer() MemBuffer
 }
 
 // Client is used to send request to KV layer.
@@ -156,12 +162,14 @@ const (
 	ReqSubTypeSignature  = 10003
 	ReqSubTypeAnalyzeIdx = 10004
 	ReqSubTypeAnalyzeCol = 10005
+	ReqSubTypeStreamAgg  = 10006
 )
 
 // Request represents a kv request.
 type Request struct {
 	// Tp is the request type.
 	Tp        int64
+	StartTs   uint64
 	Data      []byte
 	KeyRanges []KeyRange
 	// KeepOrder is true, if the response should be returned in order.
@@ -176,6 +184,13 @@ type Request struct {
 	IsolationLevel IsoLevel
 	// Priority is the priority of this KV request, its value may be PriorityNormal/PriorityLow/PriorityHigh.
 	Priority int
+	// NotFillCache makes this request do not touch the LRU cache of the underlying storage.
+	NotFillCache bool
+	// SyncLog decides whether the WAL(write-ahead log) of this request should be synchronized.
+	SyncLog bool
+	// Streaming indicates using streaming API for this request, result in that one Next()
+	// call would not corresponds to a whole region result.
+	Streaming bool
 }
 
 // Response represents the response returned from KV layer.

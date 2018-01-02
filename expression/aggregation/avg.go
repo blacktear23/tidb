@@ -14,10 +14,12 @@
 package aggregation
 
 import (
+	"github.com/cznic/mathutil"
 	"github.com/juju/errors"
 	"github.com/pingcap/tidb/mysql"
-	"github.com/pingcap/tidb/sessionctx/variable"
-	"github.com/pingcap/tidb/util/types"
+	"github.com/pingcap/tidb/sessionctx/stmtctx"
+	"github.com/pingcap/tidb/terror"
+	"github.com/pingcap/tidb/types"
 )
 
 type avgFunction struct {
@@ -30,20 +32,36 @@ func (af *avgFunction) Clone() Aggregation {
 	for i, arg := range af.Args {
 		nf.Args[i] = arg.Clone()
 	}
-	nf.resultMapper = make(aggCtxMapper)
 	return &nf
 }
 
 // GetType implements Aggregation interface.
 func (af *avgFunction) GetType() *types.FieldType {
-	ft := types.NewFieldType(mysql.TypeNewDecimal)
+	var ft *types.FieldType
+	switch af.Args[0].GetType().Tp {
+	// For child returns integer or decimal type, "avg" should returns a "decimal",
+	// otherwise it returns a "double".
+	case mysql.TypeTiny, mysql.TypeShort, mysql.TypeInt24, mysql.TypeLong, mysql.TypeLonglong, mysql.TypeNewDecimal:
+		ft = types.NewFieldType(mysql.TypeNewDecimal)
+		if af.GetMode() == FinalMode {
+			ft.Flen, ft.Decimal = af.Args[1].GetType().Flen, af.Args[1].GetType().Decimal
+		} else {
+			if af.Args[0].GetType().Decimal < 0 {
+				ft.Decimal = mysql.MaxDecimalScale
+			} else {
+				ft.Decimal = mathutil.Min(af.Args[0].GetType().Decimal+types.DivFracIncr, mysql.MaxDecimalScale)
+			}
+			ft.Flen = mysql.MaxDecimalWidth
+		}
+	default:
+		ft = types.NewFieldType(mysql.TypeDouble)
+		ft.Flen, ft.Decimal = mysql.MaxRealWidth, af.Args[0].GetType().Decimal
+	}
 	types.SetBinChsClnFlag(ft)
-	ft.Flen, ft.Decimal = mysql.MaxRealWidth, af.Args[0].GetType().Decimal
 	return ft
 }
 
-func (af *avgFunction) updateAvg(row []types.Datum, groupKey []byte, sc *variable.StatementContext) error {
-	ctx := af.getContext(groupKey)
+func (af *avgFunction) updateAvg(ctx *AggEvaluateContext, sc *stmtctx.StatementContext, row types.Row) error {
 	a := af.Args[1]
 	value, err := a.Eval(row)
 	if err != nil {
@@ -74,52 +92,47 @@ func (af *avgFunction) updateAvg(row []types.Datum, groupKey []byte, sc *variabl
 }
 
 // Update implements Aggregation interface.
-func (af *avgFunction) Update(row []types.Datum, groupKey []byte, sc *variable.StatementContext) error {
+func (af *avgFunction) Update(ctx *AggEvaluateContext, sc *stmtctx.StatementContext, row types.Row) error {
 	if af.mode == FinalMode {
-		return af.updateAvg(row, groupKey, sc)
+		return af.updateAvg(ctx, sc, row)
 	}
-	return af.updateSum(row, groupKey, sc)
+	return af.updateSum(ctx, sc, row)
 }
 
-// StreamUpdate implements Aggregation interface.
-func (af *avgFunction) StreamUpdate(row []types.Datum, sc *variable.StatementContext) error {
-	return af.streamUpdateSum(row, sc)
-}
-
-func (af *avgFunction) calculateResult(ctx *aggEvaluateContext) (d types.Datum) {
+// GetResult implements Aggregation interface.
+func (af *avgFunction) GetResult(ctx *AggEvaluateContext) (d types.Datum) {
+	var x *types.MyDecimal
 	switch ctx.Value.Kind() {
 	case types.KindFloat64:
-		t := ctx.Value.GetFloat64() / float64(ctx.Count)
-		d.SetValue(t)
+		x = new(types.MyDecimal)
+		err := x.FromFloat64(ctx.Value.GetFloat64())
+		terror.Log(errors.Trace(err))
 	case types.KindMysqlDecimal:
-		x := ctx.Value.GetMysqlDecimal()
-		y := types.NewDecFromInt(ctx.Count)
-		to := new(types.MyDecimal)
-		types.DecimalDiv(x, y, to, types.DivFracIncr)
-		to.Round(to, ctx.Value.Frac()+types.DivFracIncr, types.ModeHalfEven)
-		d.SetMysqlDecimal(to)
+		x = ctx.Value.GetMysqlDecimal()
+	default:
+		return
 	}
+	y := types.NewDecFromInt(ctx.Count)
+	to := new(types.MyDecimal)
+	err := types.DecimalDiv(x, y, to, types.DivFracIncr)
+	terror.Log(errors.Trace(err))
+	frac := af.GetType().Decimal
+	if frac == -1 {
+		frac = mysql.MaxDecimalScale
+	}
+	err = to.Round(to, frac, types.ModeHalfEven)
+	terror.Log(errors.Trace(err))
+	if ctx.Value.Kind() == types.KindFloat64 {
+		f, err := to.ToFloat64()
+		terror.Log(errors.Trace(err))
+		d.SetFloat64(f)
+		return
+	}
+	d.SetMysqlDecimal(to)
 	return
-}
-
-// GetGroupResult implements Aggregation interface.
-func (af *avgFunction) GetGroupResult(groupKey []byte) types.Datum {
-	ctx := af.getContext(groupKey)
-	return af.calculateResult(ctx)
 }
 
 // GetPartialResult implements Aggregation interface.
-func (af *avgFunction) GetPartialResult(groupKey []byte) []types.Datum {
-	ctx := af.getContext(groupKey)
+func (af *avgFunction) GetPartialResult(ctx *AggEvaluateContext) []types.Datum {
 	return []types.Datum{types.NewIntDatum(ctx.Count), ctx.Value}
-}
-
-// GetStreamResult implements Aggregation interface.
-func (af *avgFunction) GetStreamResult() (d types.Datum) {
-	if af.streamCtx == nil {
-		return
-	}
-	d = af.calculateResult(af.streamCtx)
-	af.streamCtx = nil
-	return
 }

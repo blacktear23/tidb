@@ -22,7 +22,7 @@ import (
 	"github.com/juju/errors"
 	"github.com/pingcap/tidb/mysql"
 	"github.com/pingcap/tidb/sessionctx/variable"
-	"github.com/pingcap/tidb/util/types"
+	"github.com/pingcap/tidb/types"
 )
 
 // GetSessionSystemVar gets a system variable.
@@ -30,24 +30,11 @@ import (
 // Returns error if there is no such variable.
 func GetSessionSystemVar(s *variable.SessionVars, key string) (string, error) {
 	key = strings.ToLower(key)
-	sysVar := variable.SysVars[key]
-	if sysVar == nil {
-		return "", variable.UnknownSystemVar.GenByArgs(key)
+	gVal, ok, err := GetSessionOnlySysVars(s, key)
+	if err != nil || ok {
+		return gVal, errors.Trace(err)
 	}
-	// For virtual system variables:
-	switch sysVar.Name {
-	case variable.TiDBCurrentTS:
-		return fmt.Sprintf("%d", s.TxnCtx.StartTS), nil
-	}
-	sVal, ok := s.Systems[key]
-	if ok {
-		return sVal, nil
-	}
-	if sysVar.Scope&variable.ScopeGlobal == 0 {
-		// None-Global variable can use pre-defined default value.
-		return sysVar.Value, nil
-	}
-	gVal, err := s.GlobalVarsAccessor.GetGlobalSysVar(key)
+	gVal, err = s.GlobalVarsAccessor.GetGlobalSysVar(key)
 	if err != nil {
 		return "", errors.Trace(err)
 	}
@@ -55,23 +42,54 @@ func GetSessionSystemVar(s *variable.SessionVars, key string) (string, error) {
 	return gVal, nil
 }
 
+// GetSessionOnlySysVars get the default value defined in code for session only variable.
+// The return bool value indicates whether it's a session only variable.
+func GetSessionOnlySysVars(s *variable.SessionVars, key string) (string, bool, error) {
+	sysVar := variable.SysVars[key]
+	if sysVar == nil {
+		return "", false, variable.UnknownSystemVar.GenByArgs(key)
+	}
+	// For virtual system variables:
+	switch sysVar.Name {
+	case variable.TiDBCurrentTS:
+		return fmt.Sprintf("%d", s.TxnCtx.StartTS), true, nil
+	}
+	sVal, ok := s.Systems[key]
+	if ok {
+		return sVal, true, nil
+	}
+	if sysVar.Scope&variable.ScopeGlobal == 0 {
+		// None-Global variable can use pre-defined default value.
+		return sysVar.Value, true, nil
+	}
+	return "", false, nil
+}
+
 // GetGlobalSystemVar gets a global system variable.
 func GetGlobalSystemVar(s *variable.SessionVars, key string) (string, error) {
 	key = strings.ToLower(key)
-	sysVar := variable.SysVars[key]
-	if sysVar == nil {
-		return "", variable.UnknownSystemVar.GenByArgs(key)
+	gVal, ok, err := GetScopeNoneSystemVar(key)
+	if err != nil || ok {
+		return gVal, errors.Trace(err)
 	}
-	if sysVar.Scope == variable.ScopeSession {
-		return "", variable.ErrIncorrectScope
-	} else if sysVar.Scope == variable.ScopeNone {
-		return sysVar.Value, nil
-	}
-	gVal, err := s.GlobalVarsAccessor.GetGlobalSysVar(key)
+	gVal, err = s.GlobalVarsAccessor.GetGlobalSysVar(key)
 	if err != nil {
 		return "", errors.Trace(err)
 	}
 	return gVal, nil
+}
+
+// GetScopeNoneSystemVar checks the validation of `key`,
+// and return the default value if its scope is `ScopeNone`.
+func GetScopeNoneSystemVar(key string) (string, bool, error) {
+	sysVar := variable.SysVars[key]
+	if sysVar == nil {
+		return "", false, variable.UnknownSystemVar.GenByArgs(key)
+	}
+	if sysVar.Scope == variable.ScopeNone {
+		return sysVar.Value, true, nil
+	}
+	return "", false, nil
 }
 
 // epochShiftBits is used to reserve logical part of the timestamp.
@@ -103,18 +121,14 @@ func SetSessionSystemVar(vars *variable.SessionVars, name string, value types.Da
 		}
 	case variable.SQLModeVar:
 		sVal = mysql.FormatSQLModeStr(sVal)
-		// TODO: Remove this latter.
-		if strings.Contains(sVal, "STRICT_TRANS_TABLES") || strings.Contains(sVal, "STRICT_ALL_TABLES") {
-			vars.StrictSQLMode = true
-		} else {
-			vars.StrictSQLMode = false
-		}
 		// Modes is a list of different modes separated by commas.
 		sqlMode, err2 := mysql.GetSQLMode(sVal)
 		if err2 != nil {
 			return errors.Trace(err2)
 		}
+		vars.StrictSQLMode = sqlMode.HasStrictMode()
 		vars.SQLMode = sqlMode
+		vars.SetStatusFlag(mysql.ServerStatusNoBackslashEscaped, sqlMode.HasNoBackslashEscapesMode())
 	case variable.TiDBSnapshot:
 		err = setSnapshotTS(vars, sVal)
 		if err != nil {
@@ -148,12 +162,12 @@ func SetSessionSystemVar(vars *variable.SessionVars, name string, value types.Da
 		vars.BatchInsert = tidbOptOn(sVal)
 	case variable.TiDBBatchDelete:
 		vars.BatchDelete = tidbOptOn(sVal)
-	case variable.TiDBMaxRowCountForINLJ:
-		vars.MaxRowCountForINLJ = tidbOptPositiveInt(sVal, variable.DefMaxRowCountForINLJ)
-	case variable.TiDBCBO:
-		vars.CBO = tidbOptOn(sVal)
+	case variable.TiDBDMLBatchSize:
+		vars.DMLBatchSize = tidbOptPositiveInt(sVal, variable.DefDMLBatchSize)
 	case variable.TiDBCurrentTS:
 		return variable.ErrReadOnly
+	case variable.TiDBMaxChunkSize:
+		vars.MaxChunkSize = tidbOptPositiveInt(sVal, variable.DefMaxChunkSize)
 	}
 	vars.Systems[name] = sVal
 	return nil
@@ -203,7 +217,7 @@ func setSnapshotTS(s *variable.SessionVars, sVal string) error {
 		s.SnapshotTS = 0
 		return nil
 	}
-	t, err := types.ParseTime(sVal, mysql.TypeTimestamp, types.MaxFsp)
+	t, err := types.ParseTime(s.StmtCtx, sVal, mysql.TypeTimestamp, types.MaxFsp)
 	if err != nil {
 		return errors.Trace(err)
 	}

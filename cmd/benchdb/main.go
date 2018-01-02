@@ -21,12 +21,13 @@ import (
 	"strings"
 	"time"
 
-	log "github.com/Sirupsen/logrus"
-	"github.com/pingcap/pd/pkg/logutil"
 	"github.com/pingcap/tidb"
-	"github.com/pingcap/tidb/kv"
 	"github.com/pingcap/tidb/store/tikv"
-	"golang.org/x/net/context"
+	"github.com/pingcap/tidb/store/tikv/gcworker"
+	"github.com/pingcap/tidb/terror"
+	"github.com/pingcap/tidb/util/logutil"
+	log "github.com/sirupsen/logrus"
+	goctx "golang.org/x/net/context"
 )
 
 var (
@@ -46,15 +47,20 @@ var (
 		"gc",
 		"select:0_10000:10",
 	}, "|"), "jobs to run")
+	sslCA   = flag.String("cacert", "", "path of file that contains list of trusted SSL CAs.")
+	sslCert = flag.String("cert", "", "path of file that contains X509 certificate in PEM format.")
+	sslKey  = flag.String("key", "", "path of file that contains X509 key in PEM format.")
 )
 
 func main() {
 	flag.Parse()
 	flag.PrintDefaults()
-	logutil.InitLogger(&logutil.LogConfig{
+	err := logutil.InitLogger(&logutil.LogConfig{
 		Level: *logLevel,
 	})
-	tidb.RegisterStore("tikv", tikv.Driver{})
+	terror.MustNil(err)
+	err = tidb.RegisterStore("tikv", tikv.Driver{})
+	terror.MustNil(err)
 	ut := newBenchDB()
 	works := strings.Split(*runJobs, "|")
 	for _, v := range works {
@@ -85,41 +91,37 @@ func main() {
 }
 
 type benchDB struct {
-	store   kv.Storage
+	store   tikv.Storage
 	session tidb.Session
 }
 
 func newBenchDB() *benchDB {
 	// Create TiKV store and disable GC as we will trigger GC manually.
 	store, err := tidb.NewStore("tikv://" + *addr + "?disableGC=true")
-	tidb.BootstrapSession(store)
-	if err != nil {
-		log.Fatal(err)
-	}
+	terror.MustNil(err)
+	_, err = tidb.BootstrapSession(store)
+	terror.MustNil(err)
 	session, err := tidb.CreateSession(store)
-	if err != nil {
-		log.Fatal(err)
-	}
-	_, err = session.Execute("use test")
-	if err != nil {
-		log.Fatal(err)
-	}
+	terror.MustNil(err)
+	_, err = session.Execute(goctx.Background(), "use test")
+	terror.MustNil(err)
 
 	return &benchDB{
-		store:   store,
+		store:   store.(tikv.Storage),
 		session: session,
 	}
 }
 
 func (ut *benchDB) mustExec(sql string) {
-	rss, err := ut.session.Execute(sql)
+	rss, err := ut.session.Execute(goctx.Background(), sql)
 	if err != nil {
 		log.Fatal(err)
 	}
 	if len(rss) > 0 {
+		goCtx := goctx.Background()
 		rs := rss[0]
 		for {
-			row, err1 := rs.Next()
+			row, err1 := rs.Next(goCtx)
 			if err1 != nil {
 				log.Fatal(err1)
 			}
@@ -282,7 +284,7 @@ func (ut *benchDB) manualGC(done chan bool) {
 	if err != nil {
 		log.Fatal(err)
 	}
-	err = tikv.RunGCJob(context.Background(), ut.store, ver.Ver, "benchDB")
+	err = gcworker.RunGCJob(goctx.Background(), ut.store, ver.Ver, "benchDB")
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -295,7 +297,8 @@ func (ut *benchDB) manualGC(done chan bool) {
 func (ut *benchDB) query(spec string) {
 	strs := strings.Split(spec, ":")
 	sql := strs[0]
-	count, _ := strconv.Atoi(strs[1])
+	count, err := strconv.Atoi(strs[1])
+	terror.MustNil(err)
 	ut.runCountTimes("query", count, func() {
 		ut.mustExec(sql)
 	})

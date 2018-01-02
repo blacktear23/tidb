@@ -22,8 +22,7 @@ import (
 	. "github.com/pingcap/check"
 	"github.com/pingcap/tidb/ast"
 	"github.com/pingcap/tidb/model"
-	"github.com/pingcap/tidb/store/localstore"
-	"github.com/pingcap/tidb/store/localstore/goleveldb"
+	"github.com/pingcap/tidb/store/tikv"
 	"github.com/pingcap/tidb/util/mock"
 	"github.com/pingcap/tidb/util/testleak"
 )
@@ -47,12 +46,16 @@ func sysMockFactory(dom *Domain) (pools.Resource, error) {
 }
 
 func (*testSuite) TestT(c *C) {
-	driver := localstore.Driver{Driver: goleveldb.MemoryDriver{}}
-	store, err := driver.Open("memory")
-	c.Assert(err, IsNil)
 	defer testleak.AfterTest(c)()
-	dom, err := NewDomain(store, 80*time.Millisecond, 0, mockFactory, sysMockFactory)
+	store, err := tikv.NewMockTikvStore()
 	c.Assert(err, IsNil)
+	ddlLease := 80 * time.Millisecond
+	dom := NewDomain(store, ddlLease, 0, mockFactory)
+	err = dom.Init(ddlLease, sysMockFactory)
+	c.Assert(err, IsNil)
+	defer func() {
+		dom.Close()
+	}()
 	store = dom.Store()
 	ctx := mock.NewContext()
 	ctx.Store = store
