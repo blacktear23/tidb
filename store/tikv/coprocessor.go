@@ -406,6 +406,7 @@ func buildCopTasks(bo *Backoffer, cache *RegionCache, ranges *copRanges, desc bo
 				region:   region,
 				ranges:   splitedRanges,
 				respChan: make(chan copResponse, 1),
+				cmdType:  cmdType,
 			})
 		}
 	}

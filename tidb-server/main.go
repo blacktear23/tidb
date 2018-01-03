@@ -103,6 +103,10 @@ var (
 	metricsAddr     = flag.String(nmMetricsAddr, "", "prometheus pushgateway address, leaves it empty will disable prometheus push.")
 	metricsInterval = flag.Int(nmMetricsInterval, 15, "prometheus client push interval in second, set \"0\" to disable prometheus push.")
 
+	// PROXY Protocol
+	proxyProtocolNetworks      = flag.String(nmProxyProtocolNetworks, "", "proxy protocol networks allowed IP or *, empty mean disable proxy protocol support")
+	proxyProtocolHeaderTimeout = flag.Int(nmProxyProtocolHeaderTimeout, 5, "proxy protocol header read timeout, unit is second.")
+
 	// Coprocessor Parallel Level
 	copParallelLevel = flag.Int(nmCoprocessorParallelLevel, 1, "coprocessor parallel level")
 
