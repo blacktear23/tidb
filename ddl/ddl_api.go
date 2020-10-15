@@ -2278,6 +2278,8 @@ func (d *ddl) AlterTable(ctx sessionctx.Context, ident ast.Ident, specs []*ast.A
 				err = d.AddColumns(ctx, ident, validSpecs)
 			case ast.AlterTableDropColumn:
 				err = d.DropColumns(ctx, ident, validSpecs)
+			case ast.AlterTableAddConstraint:
+				err = d.CreateIndices(ctx, ident, validSpecs)
 			default:
 				return errRunMultiSchemaChanges
 			}
@@ -5595,6 +5597,166 @@ func (d *ddl) AlterTablePartition(ctx sessionctx.Context, ident ast.Ident, spec 
 		return errors.Trace(err)
 	}
 
+	err = d.callHookOnChanged(err)
+	return errors.Trace(err)
+}
+
+func (d *ddl) CreateIndices(ctx sessionctx.Context, ident ast.Ident, specs []*ast.AlterTableSpec) error {
+	schema, t, err := d.getSchemaAndTableByIdent(ctx, ident)
+	if err != nil {
+		return errors.Trace(err)
+	}
+
+	idxUnique := make(map[string]bool)
+	filteredSpecs := make([]*ast.AlterTableSpec, 0, len(specs))
+	for _, spec := range specs {
+		constr := spec.Constraint
+		var unique bool
+		switch constr.Tp {
+		// Do not support Primary Key now
+		case ast.ConstraintKey, ast.ConstraintIndex:
+			unique = false
+		case ast.ConstraintUniq, ast.ConstraintUniqIndex, ast.ConstraintUniqKey:
+			unique = true
+		default:
+			return errRunMultiSchemaChanges
+		}
+		idxName := model.NewCIStr(constr.Name)
+		if _, have := idxUnique[idxName.L]; have {
+			// Duplicate index name in statement
+			err = ErrDupKeyName.GenWithStack("index already exist %s", idxName)
+			if !constr.IfNotExists {
+				return err
+			} else {
+				ctx.GetSessionVars().StmtCtx.AppendNote(err)
+			}
+		} else {
+			idxUnique[idxName.L] = unique
+			filteredSpecs = append(filteredSpecs, spec)
+		}
+	}
+
+	numSpecs := len(filteredSpecs)
+	var (
+		idxUniques     = make([]bool, 0, numSpecs)
+		idxNames       = make([]model.CIStr, 0, numSpecs)
+		idxPartSpecses = make([][]*ast.IndexPartSpecification, 0, numSpecs)
+		idxOptions     = make([]*ast.IndexOption, 0, numSpecs)
+		hiddenCols     = make([]*model.ColumnInfo, 0, numSpecs)
+		idxGlobals     = make([]bool, 0, numSpecs)
+		idxIfNotExists = make([]bool, 0, numSpecs)
+	)
+
+	for _, spec := range filteredSpecs {
+		constr := spec.Constraint
+		idxName := model.NewCIStr(constr.Name)
+		unique := idxUnique[idxName.L]
+		option := constr.Option
+		indexPartSpecifications := constr.Keys
+		ifNotExists := constr.IfNotExists
+
+		// Deal with anonymous index.
+		if len(idxName.L) == 0 {
+			colName := model.NewCIStr("expression_index")
+			if indexPartSpecifications[0].Column != nil {
+				colName = indexPartSpecifications[0].Column.Name
+			}
+			idxName = getAnonymousIndex(t, colName)
+		}
+
+		if indexInfo := t.Meta().FindIndexByName(idxName.L); indexInfo != nil {
+			if indexInfo.State != model.StatePublic {
+				// NOTE: explicit error message. See issue #18363.
+				err = ErrDupKeyName.GenWithStack("index already exist %s; "+
+					"a background job is trying to add the same index, "+
+					"please check by `ADMIN SHOW DDL JOBS`", idxName)
+			} else {
+				err = ErrDupKeyName.GenWithStack("index already exist %s", idxName)
+			}
+			if !ifNotExists {
+				return err
+			} else {
+				ctx.GetSessionVars().StmtCtx.AppendNote(err)
+			}
+		}
+
+		if err = checkTooLongIndex(idxName); err != nil {
+			return errors.Trace(err)
+		}
+
+		tblInfo := t.Meta()
+
+		newHiddenCols, err := buildHiddenColumnInfo(ctx, indexPartSpecifications, idxName, t.Meta(), t.Cols())
+		if err != nil {
+			return err
+		}
+
+		hiddenCols = append(hiddenCols, newHiddenCols...)
+
+		if err = checkAddColumnTooManyColumns(len(t.Cols()) + len(hiddenCols)); err != nil {
+			return errors.Trace(err)
+		}
+
+		// Check before the job is put to the queue.
+		// This check is redundant, but useful. If DDL check fail before the job is put
+		// to job queue, the fail path logic is super fast.
+		// After DDL job is put to the queue, and if the check fail, TiDB will run the DDL cancel logic.
+		// The recover step causes DDL wait a few seconds, makes the unit test painfully slow.
+		// For same reason, decide whether index is global here.
+		indexColumns, err := buildIndexColumns(append(tblInfo.Columns, hiddenCols...), indexPartSpecifications)
+		if err != nil {
+			return errors.Trace(err)
+		}
+
+		global := false
+		if unique && tblInfo.GetPartitionInfo() != nil {
+			ck, err := checkPartitionKeysConstraint(tblInfo.GetPartitionInfo(), indexColumns, tblInfo)
+			if err != nil {
+				return err
+			}
+			if !ck {
+				if !config.GetGlobalConfig().EnableGlobalIndex {
+					return ErrUniqueKeyNeedAllFieldsInPf.GenWithStackByArgs("UNIQUE INDEX")
+				}
+				//index columns does not contain all partition columns, must set global
+				global = true
+			}
+		}
+		// May be truncate comment here, when index comment too long and sql_mode is't strict.
+		if _, err = validateCommentLength(ctx.GetSessionVars(), idxName.String(), option); err != nil {
+			return errors.Trace(err)
+		}
+
+		// prepare job parameters
+		idxUniques = append(idxUniques, unique)
+		idxNames = append(idxNames, idxName)
+		idxPartSpecses = append(idxPartSpecses, indexPartSpecifications)
+		idxOptions = append(idxOptions, option)
+		idxGlobals = append(idxGlobals, global)
+		idxIfNotExists = append(idxIfNotExists, ifNotExists)
+	}
+
+	// No new indices need to be created, just return.
+	if len(idxNames) == 0 {
+		return nil
+	}
+
+	job := &model.Job{
+		SchemaID:   schema.ID,
+		TableID:    t.Meta().ID,
+		SchemaName: schema.Name.L,
+		Type:       model.ActionAddIndices,
+		BinlogInfo: &model.HistoryInfo{},
+		ReorgMeta: &model.DDLReorgMeta{
+			SQLMode:       ctx.GetSessionVars().SQLMode,
+			Warnings:      make(map[errors.ErrorID]*terror.Error),
+			WarningsCount: make(map[errors.ErrorID]int64),
+		},
+		Args:     []interface{}{idxUniques, idxNames, idxPartSpecses, idxOptions, hiddenCols, idxGlobals, idxIfNotExists},
+		Priority: ctx.GetSessionVars().DDLReorgPriority,
+	}
+
+	err = d.doDDLJob(ctx, job)
 	err = d.callHookOnChanged(err)
 	return errors.Trace(err)
 }

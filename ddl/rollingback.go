@@ -15,6 +15,7 @@ package ddl
 
 import (
 	"fmt"
+	"strings"
 
 	"github.com/pingcap/errors"
 	"github.com/pingcap/parser/ast"
@@ -416,6 +417,8 @@ func convertJob2RollbackJob(w *worker, d *ddlCtx, t *meta.Meta, job *model.Job) 
 		ver, err = rollingbackAddIndex(w, d, t, job, false)
 	case model.ActionAddPrimaryKey:
 		ver, err = rollingbackAddIndex(w, d, t, job, true)
+	case model.ActionAddIndices:
+		ver, err = rollingbackAddIndices(w, d, t, job)
 	case model.ActionAddTablePartition:
 		ver, err = rollingbackAddTablePartition(t, job)
 	case model.ActionDropColumn:
@@ -468,4 +471,85 @@ func convertJob2RollbackJob(w *worker, d *ddlCtx, t *meta.Meta, job *model.Job) 
 	}
 
 	return
+}
+
+func rollingbackAddIndices(w *worker, d *ddlCtx, t *meta.Meta, job *model.Job) (ver int64, err error) {
+	// If the value of SnapshotVer isn't zero, it means the work is backfilling the indices.
+	if job.SchemaState == model.StateWriteReorganization && job.SnapshotVer != 0 {
+		// add index workers are started. need to ask them to exit.
+		logutil.Logger(w.logCtx).Info("[ddl] run the cancelling DDL job", zap.String("job", job.String()))
+		w.reorgCtx.notifyReorgCancel()
+		ver, err = w.onCreateIndices(d, t, job)
+	} else {
+		ver, err = convertNotStartAddIndicesJob2RollbackJob(t, job, errCancelledDDLJob)
+	}
+	return
+}
+
+func convertNotStartAddIndicesJob2RollbackJob(t *meta.Meta, job *model.Job, occuredErr error) (ver int64, err error) {
+	schemaID := job.SchemaID
+	tblInfo, err := getTableInfoAndCancelFaultJob(t, job, schemaID)
+	if err != nil {
+		return ver, errors.Trace(err)
+	}
+
+	var (
+		idxUniques     []bool
+		idxGlobals     []bool
+		idxIfNotExists []bool
+		idxNames       []model.CIStr
+		idxPartSpecses [][]*ast.IndexPartSpecification
+		idxOptions     []*ast.IndexOption
+		hiddenCols     []*model.ColumnInfo
+	)
+
+	err = job.DecodeArgs(&idxUniques, &idxNames, &idxPartSpecses, &idxOptions, &hiddenCols, idxGlobals, idxIfNotExists)
+	if err != nil {
+		job.State = model.JobStateCancelled
+		return ver, errors.Trace(err)
+	}
+
+	indexInfos := make([]*model.IndexInfo, 0, len(idxNames))
+	for _, idxName := range idxNames {
+		indexInfo := tblInfo.FindIndexByName(idxName.L)
+		if indexInfo != nil {
+			indexInfos = append(indexInfos, indexInfo)
+		}
+	}
+
+	if len(indexInfos) == 0 {
+		job.State = model.JobStateCancelled
+		return ver, errCancelledDDLJob
+	}
+
+	return convertAddIndicesJob2RollbackJob(t, job, tblInfo, indexInfos, occuredErr)
+}
+
+func convertAddIndicesJob2RollbackJob(t *meta.Meta, job *model.Job, tblInfo *model.TableInfo, indexInfos []*model.IndexInfo, err error) (int64, error) {
+	job.State = model.JobStateRollingback
+
+	idxNames := make([]model.CIStr, 0, len(indexInfos))
+	for _, idxInfo := range indexInfos {
+		idxNames = append(idxNames, idxInfo.Name)
+	}
+
+	job.Args = []interface{}{idxNames, getPartitionIDs(tblInfo)}
+
+	originalState := indexInfos[0].State
+	setIndicesState(indexInfos, model.StateDeleteOnly)
+	updateHiddenColumnsWithIndices(tblInfo, indexInfos, model.StateDeleteOnly)
+	ver, err1 := updateVersionAndTableInfo(t, job, tblInfo, originalState != indexInfos[0].State)
+	if err1 != nil {
+		return ver, errors.Trace(err1)
+	}
+
+	if kv.ErrKeyExists.Equal(err) {
+		nameOrigins := make([]string, 0, len(idxNames))
+		for _, idxName := range idxNames {
+			nameOrigins = append(nameOrigins, idxName.O)
+		}
+		return ver, kv.ErrKeyExists.GenWithStackByArgs("", strings.Join(nameOrigins, ", "))
+	}
+
+	return ver, errors.Trace(err)
 }

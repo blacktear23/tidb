@@ -1249,3 +1249,299 @@ func findIndexesByColName(indexes []*model.IndexInfo, colName string) ([]*model.
 	}
 	return idxInfos, offsets
 }
+
+func (w *worker) onCreateIndices(d *ddlCtx, t *meta.Meta, job *model.Job) (ver int64, err error) {
+	// TODO: implements Rollingback
+	/*
+		if job.IsRollingback() {
+			ver, err = onDropIndices(t, job)
+			if err != nil {
+				return ver, errors.Trace(err)
+			}
+			return ver, nil
+		}
+	*/
+
+	schemaID := job.SchemaID
+	tblInfo, err := getTableInfoAndCancelFaultJob(t, job, schemaID)
+	if err != nil {
+		return ver, errors.Trace(err)
+	}
+
+	var (
+		idxUniques     []bool
+		idxGlobals     []bool
+		idxIfNotExists []bool
+		idxNames       []model.CIStr
+		idxPartSpecses [][]*ast.IndexPartSpecification
+		idxOptions     []*ast.IndexOption
+		hiddenCols     []*model.ColumnInfo
+	)
+
+	err = job.DecodeArgs(&idxUniques, &idxNames, &idxPartSpecses, &idxOptions, &hiddenCols, idxGlobals, idxIfNotExists)
+
+	if err != nil {
+		job.State = model.JobStateCancelled
+		return ver, errors.Trace(err)
+	}
+
+	first := false
+	idxInfos := make([]*model.IndexInfo, 0, len(idxNames))
+	for i := 0; i < len(idxNames); i++ {
+		idxName := idxNames[i]
+		ifNotExists := idxIfNotExists[i]
+		indexPartSpecifications := idxPartSpecses[i]
+		option := idxOptions[i]
+		unique := idxUniques[i]
+		global := idxGlobals[i]
+
+		indexInfo := tblInfo.FindIndexByName(idxName.L)
+		if indexInfo != nil {
+			if indexInfo.State == model.StatePublic {
+				if !ifNotExists {
+					job.State = model.JobStateCancelled
+					err = ErrDupKeyName.GenWithStack("index already exists %s", idxName)
+					return ver, err
+				} else {
+					continue
+				}
+			}
+			idxInfos = append(idxInfos, indexInfo)
+		} else {
+			// If we got there means we create indices first time
+			if !first {
+				first = true
+			}
+			// Create Index
+			indexInfo, err = buildIndexInfo(tblInfo, idxName, indexPartSpecifications, model.StateNone)
+			if err != nil {
+				job.State = model.JobStateCancelled
+				return ver, errors.Trace(err)
+			}
+			if option != nil {
+				indexInfo.Comment = option.Comment
+				if option.Visibility == ast.IndexVisibilityInvisible {
+					indexInfo.Invisible = true
+				}
+				if option.Tp == model.IndexTypeInvalid {
+					// Use btree as default index type
+					indexInfo.Tp = model.IndexTypeBtree
+				} else {
+					indexInfo.Tp = option.Tp
+				}
+			} else {
+				// Use btree as default index type
+				indexInfo.Tp = model.IndexTypeBtree
+			}
+			indexInfo.Primary = false
+			indexInfo.Unique = unique
+			indexInfo.Global = global
+			indexInfo.ID = allocateIndexID(tblInfo)
+			tblInfo.Indices = append(tblInfo.Indices, indexInfo)
+
+			// Here we need do this check before set state to `DeleteOnly`,
+			// because if hidden columns has been set to `DeleteOnly`,
+			// the `DeleteOnly` columns are missing when we do this check.
+			if err := checkInvisibleIndexOnPK(tblInfo); err != nil {
+				job.State = model.JobStateCancelled
+				return ver, err
+			}
+			logutil.BgLogger().Info("[ddl] run add index job", zap.String("job", job.String()), zap.Reflect("indexInfo", indexInfo))
+			idxInfos = append(idxInfos, indexInfo)
+		}
+	}
+
+	if len(idxInfos) == 0 {
+		// No index need to be created, just finish it.
+		job.State = model.JobStateCancelled
+		return ver, nil
+	}
+
+	for _, hiddenCol := range hiddenCols {
+		columnInfo := model.FindColumnInfo(tblInfo.Columns, hiddenCol.Name.L)
+		if columnInfo != nil && columnInfo.State == model.StatePublic {
+			// We already have a column with the same column name.
+			job.State = model.JobStateCancelled
+			// TODO: refine the error message
+			return ver, infoschema.ErrColumnExists.GenWithStackByArgs(hiddenCol.Name)
+		}
+	}
+
+	if first {
+		if len(hiddenCols) > 0 {
+			pos := &ast.ColumnPosition{Tp: ast.ColumnPositionNone}
+			for _, hiddenCol := range hiddenCols {
+				_, _, _, err = createColumnInfo(tblInfo, hiddenCol, pos)
+				if err != nil {
+					job.State = model.JobStateCancelled
+					return ver, errors.Trace(err)
+				}
+			}
+		}
+		if err = checkAddColumnTooManyColumns(len(tblInfo.Columns)); err != nil {
+			job.State = model.JobStateCancelled
+			return ver, errors.Trace(err)
+		}
+	}
+
+	return w.doCreateIndices(d, t, job, schemaID, tblInfo, idxInfos)
+}
+
+func (w *worker) doCreateIndices(d *ddlCtx, t *meta.Meta, job *model.Job, schemaID int64, tblInfo *model.TableInfo, idxInfos []*model.IndexInfo) (ver int64, err error) {
+	originalState := idxInfos[0].State
+	switch idxInfos[0].State {
+	case model.StateNone:
+		// none -> delete only
+		setIndicesState(idxInfos, model.StateDeleteOnly)
+		updateHiddenColumnsWithIndices(tblInfo, idxInfos, model.StateDeleteOnly)
+		ver, err = updateVersionAndTableInfoWithCheck(t, job, tblInfo, originalState != idxInfos[0].State)
+		if err != nil {
+			return ver, err
+		}
+		metrics.AddIndexProgress.Set(0)
+		job.SchemaState = model.StateDeleteOnly
+	case model.StateDeleteOnly:
+		// delete only -> write only
+		setIndicesState(idxInfos, model.StateWriteOnly)
+		updateHiddenColumnsWithIndices(tblInfo, idxInfos, model.StateWriteOnly)
+		ver, err = updateVersionAndTableInfo(t, job, tblInfo, originalState != idxInfos[0].State)
+		if err != nil {
+			return ver, err
+		}
+		metrics.AddIndexProgress.Set(0)
+		job.SchemaState = model.StateWriteOnly
+	case model.StateWriteOnly:
+		// write only -> reorganization
+		setIndicesState(idxInfos, model.StateWriteReorganization)
+		updateHiddenColumnsWithIndices(tblInfo, idxInfos, model.StateWriteReorganization)
+		// Initialize SnapshotVer to 0 for later reorganization check.
+		job.SnapshotVer = 0
+		ver, err = updateVersionAndTableInfo(t, job, tblInfo, originalState != idxInfos[0].State)
+		if err != nil {
+			return ver, err
+		}
+		job.SchemaState = model.StateWriteReorganization
+	case model.StateWriteReorganization:
+		// reorganization -> public
+		updateHiddenColumnsWithIndices(tblInfo, idxInfos, model.StatePublic)
+		ver, first, err = runAndWaitCreateIndicesReorgJob(w, d, t, job, tblInfo, idxInfos, ver)
+		if err != nil {
+			if errWaitReorgTimeout.Equal(err) {
+				return ver, nil
+			}
+			return ver, errors.Trace(err)
+		}
+
+		if first {
+			// If we run reorg firstly, we should update the job snapshot version
+			// and then run the reorg next time.
+			return ver, nil
+		}
+		for _, idxInfo := range idxInfos {
+			addIndexColumnFlag(tblInfo, idxInfo)
+			idxInfo.State = model.StatePublic
+		}
+
+		ver, err = updateVersionAndTableInfo(t, job, tblInfo, originalState != idxInfos[0].State)
+		if err != nil {
+			return ver, errors.Trace(err)
+		}
+		job.FinishTableJob(model.JobStateDone, model.StatePublic, ver, tblInfo)
+	default:
+		err = ErrInvalidDDLState.GenWithStackByArgs("indices", tblInfo.State)
+	}
+	return ver, errors.Trace(err)
+}
+
+func updateHiddenColumnsWithIndices(tblInfo *model.TableInfo, idxInfos []*model.IndexInfo, state model.SchemaState) {
+	for _, idxInfo := range idxInfos {
+		updateHiddenColumns(tblInfo, idxInfo, state)
+	}
+}
+
+func runAndWaitCreateIndicesReorgJob(w *worker, d *ddlCtx, t *meta.Meta, job *model.Job, tblInfo *model.TableInfo, indexInfos []*model.IndexInfo, ver int64) (int64, bool, error) {
+	tbl, err := getTable(d.store, job.SchemaID, tblInfo)
+	if err != nil {
+		return ver, false, errors.Trace(err)
+	}
+
+	reorgInfo, err := getReorgInfo(d, t, job, tbl, buildIndicesElements(indexInfos))
+	if err != nil || reorgInfo.first {
+		// If we run reorg firstly, we should update the job snapshot version
+		// and then run the reorg next time.
+		return ver, true, errors.Trace(err)
+	}
+
+	err = w.runReorgJob(t, reorgInfo, tbl.Meta(), d.lease, func() (addIndexErr error) {
+		var currentIdx *model.IndexInfo
+		defer util.Recover(metrics.LabelDDL, "onCreateIndices",
+			func() {
+				if currentIdx != nil {
+					addIndexErr = errCancelledDDLJob.GenWithStack("add table `%v` indices `%v` panic", tblInfo.Name, currentIdx.Name)
+				} else {
+					addIndexErr = errCancelledDDLJob.GenWithStack("add table `%v` panic", tblInfo.Name)
+				}
+			}, false)
+
+		// Get the original start handle and end handle.
+		currentVer, err := getValidCurrentVersion(reorgInfo.d.store)
+		if err != nil {
+			return errors.Trace(err)
+		}
+		originalStartHandle, originalEndHandle, err := getTableRange(reorgInfo.d, tbl.(table.PhysicalTable), currentVer.Ver, reorgInfo.Job.Priority)
+		if err != nil {
+			return errors.Trace(err)
+		}
+
+		startElementOffset := 0
+		startElementOffsetToResetHandle := -1
+		if bytes.Equal(reorgInfo.currElement.TypeKey, meta.IndexElementKey) {
+			for i, idx := range indexInfos {
+				if reorgInfo.currElement.ID == idx.ID {
+					startElementOffset = i
+					startElementOffsetToResetHandle = i
+					break
+				}
+			}
+		}
+
+		for i := startElementOffset; i < len(indexInfos); i++ {
+			currentIdx = indexInfos[i]
+			if i == startElementOffsetToResetHandle {
+				reorgInfo.StartHandle, reorgInfo.EndHandle = originalStartHandle, originalEndHandle
+			}
+
+			reorgInfo.currElement = reorgInfo.elements[i]
+			// Write the reorg info to store so the whole reorganize process can recover from panic.
+			err := reorgInfo.UpdateReorgMeta(reorgInfo.StartHandle)
+			logutil.BgLogger().Info("[ddl] drop columns with composite indices", zap.Int64("jobID", reorgInfo.Job.ID),
+				zap.ByteString("elementType", reorgInfo.currElement.TypeKey), zap.Int64("elementID", reorgInfo.currElement.ID),
+				zap.String("startHandle", toString(reorgInfo.StartHandle)), zap.String("endHandle", toString(reorgInfo.EndHandle)))
+			if err != nil {
+				return errors.Trace(err)
+			}
+			err = w.addTableIndex(tbl, currentIdx, reorgInfo)
+			if err != nil {
+				return errors.Trace(err)
+			}
+		}
+		return nil
+	})
+
+	if err != nil {
+		if errWaitReorgTimeout.Equal(err) {
+			// if timeout, we should return, check for the owner and re-wait job done.
+			return ver, false, err
+		}
+		if kv.ErrKeyExists.Equal(err) || errCancelledDDLJob.Equal(err) || errCantDecodeRecord.Equal(err) {
+			logutil.BgLogger().Warn("[ddl] run add index job failed, convert job to rollback", zap.String("job", job.String()), zap.Error(err))
+			ver, err = convertAddIndicesJob2RollbackJob(t, job, tblInfo, indexInfos, err)
+		}
+		// Clean up the channel of notifyCancelReorgJob. Make sure it can't affect other jobs.
+		w.reorgCtx.cleanNotifyReorgCancel()
+		return ver, false, errors.Trace(err)
+	}
+	// Clean up the channel of notifyCancelReorgJob. Make sure it can't affect other jobs.
+	w.reorgCtx.cleanNotifyReorgCancel()
+	return ver, false, nil
+}

@@ -641,6 +641,8 @@ func (w *worker) runDDLJob(d *ddlCtx, t *meta.Meta, job *model.Job) (ver int64, 
 		ver, err = onSetDefaultValue(t, job)
 	case model.ActionAddIndex:
 		ver, err = w.onCreateIndex(d, t, job, false)
+	case model.ActionAddIndices:
+		ver, err = w.onCreateIndices(d, t, job)
 	case model.ActionAddPrimaryKey:
 		ver, err = w.onCreateIndex(d, t, job, true)
 	case model.ActionDropIndex, model.ActionDropPrimaryKey:
