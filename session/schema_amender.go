@@ -42,7 +42,7 @@ import (
 
 const amendableType = nonMemAmendType | memBufAmendType
 const nonMemAmendType = (1 << model.ActionAddColumn) | (1 << model.ActionDropColumn) | (1 << model.ActionDropIndex)
-const memBufAmendType = uint64(1<<model.ActionAddIndex) | (1 << model.ActionModifyColumn)
+const memBufAmendType = uint64(1<<model.ActionAddIndex) | (1 << model.ActionModifyColumn) | (1 << model.ActionAddIndices)
 
 // Amend operation types.
 const (
@@ -132,7 +132,7 @@ func (a *amendCollector) keyHasAmendOp(key []byte) bool {
 }
 
 func needCollectIndexOps(actionType uint64) bool {
-	return actionType&(1<<model.ActionAddIndex) != 0
+	return actionType&((1<<model.ActionAddIndex)|1<<model.ActionAddIndices) != 0
 }
 
 func needCollectModifyColOps(actionType uint64) bool {
