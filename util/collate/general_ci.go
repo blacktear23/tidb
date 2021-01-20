@@ -14,6 +14,8 @@
 package collate
 
 import (
+	"fmt"
+
 	"github.com/pingcap/tidb/util/stringutil"
 )
 
@@ -27,6 +29,7 @@ type decodeCache map[int]cacheEntry
 func (dc decodeCache) getRuneInt(v string, i int) (int, int) {
 	e, h := dc[i]
 	if h {
+		fmt.Println("Hit Cache", e.r, e.i)
 		return e.r, e.i
 	}
 	r, ni := decodeRune(v, i)
