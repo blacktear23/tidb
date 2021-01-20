@@ -27,7 +27,6 @@ type decodeCache map[int]cacheEntry
 func (dc decodeCache) getRuneInt(v string, i int) (int, int) {
 	e, h := dc[i]
 	if h {
-		fmt.Println("Hit Cache", e.r, e.i)
 		return e.r, e.i
 	}
 	r, ni := decodeRune(v, i)
@@ -36,7 +35,6 @@ func (dc decodeCache) getRuneInt(v string, i int) (int, int) {
 		r: rint,
 		i: ni,
 	}
-	fmt.Println("Miss Cache", rint, ni)
 	return rint, ni
 }
 
