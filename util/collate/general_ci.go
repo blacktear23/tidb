@@ -17,20 +17,59 @@ import (
 	"github.com/pingcap/tidb/util/stringutil"
 )
 
+type cacheEntry struct {
+	r int
+	i int
+}
+
+type decodeCache map[int]cacheEntry
+
+func (dc decodeCache) getRuneInt(v string, i int) (int, int) {
+	e, h := dc[i]
+	if h {
+		fmt.Println("Hit Cache", e.r, e.i)
+		return e.r, e.i
+	}
+	r, ni := decodeRune(v, i)
+	rint := int(convertRuneGeneralCI(r))
+	dc[i] = cacheEntry{
+		r: rint,
+		i: ni,
+	}
+	fmt.Println("Miss Cache", rint, ni)
+	return rint, ni
+}
+
 type generalCICollator struct {
+	cache map[string]decodeCache
 }
 
 // Compare implements Collator interface.
 func (gc *generalCICollator) Compare(a, b string) int {
 	a = truncateTailingSpace(a)
 	b = truncateTailingSpace(b)
-	r1, r2 := rune(0), rune(0)
+	// r1, r2 := rune(0), rune(0)
+	r1int, r2int := 0, 0
 	ai, bi := 0, 0
+	adc, ah := gc.cache[a]
+	if !ah {
+		adc = decodeCache{}
+		gc.cache[a] = adc
+	}
+	bdc, bh := gc.cache[b]
+	if !bh {
+		bdc = decodeCache{}
+		gc.cache[b] = bdc
+	}
 	for ai < len(a) && bi < len(b) {
-		r1, ai = decodeRune(a, ai)
-		r2, bi = decodeRune(b, bi)
-
-		cmp := int(convertRuneGeneralCI(r1)) - int(convertRuneGeneralCI(r2))
+		r1int, ai = adc.getRuneInt(a, ai)
+		r2int, bi = bdc.getRuneInt(b, bi)
+		/*
+			r1, ai = decodeRune(a, ai)
+			r2, bi = decodeRune(b, bi)
+			cmp := int(convertRuneGeneralCI(r1)) - int(convertRuneGeneralCI(r2))
+		*/
+		cmp := r1int - r2int
 		if cmp != 0 {
 			return sign(cmp)
 		}
