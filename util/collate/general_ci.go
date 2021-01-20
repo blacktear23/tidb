@@ -22,15 +22,100 @@ type generalCICollator struct {
 
 // Compare implements Collator interface.
 func (gc *generalCICollator) Compare(a, b string) int {
-	a = truncateTailingSpace(a)
-	b = truncateTailingSpace(b)
+	// a = truncateTailingSpace(a)
+	alen := len(a)
+	asi := alen - 1
+	for ; asi >= 0; asi-- {
+		if a[asi] != ' ' {
+			break
+		}
+	}
+	a = a[:asi+1]
+
+	// b = truncateTailingSpace(b)
+	blen := len(b)
+	bsi := blen - 1
+	for ; bsi >= 0; bsi-- {
+		if b[bsi] != ' ' {
+			break
+		}
+	}
+	b = b[:bsi+1]
+
 	r1, r2 := rune(0), rune(0)
+	ir1, ir2 := 0, 0
 	ai, bi := 0, 0
 	for ai < len(a) && bi < len(b) {
-		r1, ai = decodeRune(a, ai)
-		r2, bi = decodeRune(b, bi)
+		switch d := a[ai]; {
+		case d < 0x80:
+			r1 = rune(d)
+			ai += 1
+		case d < 0xE0:
+			r1 = rune(d&b2Mask)<<6 |
+				rune(a[1+ai]&mbMask)
+			ai += 2
+		case d < 0xF0:
+			r1 = rune(d&b3Mask)<<12 |
+				rune(a[ai+1]&mbMask)<<6 |
+				rune(a[ai+2]&mbMask)
+			ai += 3
+		default:
+			r1 = rune(d&b4Mask)<<18 |
+				rune(a[ai+1]&mbMask)<<12 |
+				rune(a[ai+2]&mbMask)<<6 |
+				rune(a[ai+3]&mbMask)
+			ai += 4
+		}
 
-		cmp := int(convertRuneGeneralCI(r1)) - int(convertRuneGeneralCI(r2))
+		switch d := b[bi]; {
+		case d < 0x80:
+			r2 = rune(d)
+			bi += 1
+		case d < 0xE0:
+			r2 = rune(d&b2Mask)<<6 |
+				rune(b[1+bi]&mbMask)
+			bi += 2
+		case d < 0xF0:
+			r2 = rune(d&b3Mask)<<12 |
+				rune(b[bi+1]&mbMask)<<6 |
+				rune(b[bi+2]&mbMask)
+			bi += 3
+		default:
+			r2 = rune(d&b4Mask)<<18 |
+				rune(b[bi+1]&mbMask)<<12 |
+				rune(b[bi+2]&mbMask)<<6 |
+				rune(b[bi+3]&mbMask)
+			bi += 4
+		}
+
+		if r1 > 0xFFFF {
+			ir1 = int(0xFFFD)
+		} else {
+			r1plane := planeTable[r1>>8]
+			if r1plane == nil {
+				ir1 = int(uint16(r1))
+			} else {
+				ir1 = int(r1plane[r1&0xFF])
+			}
+		}
+
+		if r2 > 0xFFFF {
+			ir2 = int(0xFFFD)
+		} else {
+			r2plane := planeTable[r2>>8]
+			if r2plane == nil {
+				ir2 = int(uint16(r2))
+			} else {
+				ir2 = int(r2plane[r2&0xFF])
+			}
+		}
+		cmp := ir1 - ir2
+
+		/*
+			r1, ai = decodeRune(a, ai)
+			r2, bi = decodeRune(b, bi)
+			cmp := int(convertRuneGeneralCI(r1)) - int(convertRuneGeneralCI(r2))
+		*/
 		if cmp != 0 {
 			return sign(cmp)
 		}
