@@ -91,23 +91,13 @@ func (gc *generalCICollator) Compare(a, b string) int {
 		if r1 > 0xFFFF {
 			ir1 = int(0xFFFD)
 		} else {
-			r1plane := planeTable[r1>>8]
-			if r1plane == nil {
-				ir1 = int(uint16(r1))
-			} else {
-				ir1 = int(r1plane[r1&0xFF])
-			}
+			ir1 = int(gciMapTable[r1])
 		}
 
 		if r2 > 0xFFFF {
 			ir2 = int(0xFFFD)
 		} else {
-			r2plane := planeTable[r2>>8]
-			if r2plane == nil {
-				ir2 = int(uint16(r2))
-			} else {
-				ir2 = int(r2plane[r2&0xFF])
-			}
+			ir2 = int(gciMapTable[r2])
 		}
 		cmp := ir1 - ir2
 
