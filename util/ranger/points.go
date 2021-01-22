@@ -36,6 +36,11 @@ var (
 	ErrUnsupportedType = dbterror.ClassOptimizer.NewStd(errno.ErrUnsupportedType)
 )
 
+type pointsCacheEntry struct {
+	points  []point
+	hasNull bool
+}
+
 // RangeType is alias for int.
 type RangeType int
 
@@ -438,6 +443,13 @@ func (r *builder) buildFromIsFalse(expr *expression.ScalarFunction, isNot int) [
 }
 
 func (r *builder) buildFromIn(expr *expression.ScalarFunction) ([]point, bool) {
+	pc := r.sc.GetPointsCache()
+	key := expr.String()
+	entry, have := pc.Get(key)
+	if have {
+		cached := entry.(*pointsCacheEntry)
+		return cached.points, cached.hasNull
+	}
 	list := expr.GetArgs()[1:]
 	rangePoints := make([]point, 0, len(list)*2)
 	hasNull := false
@@ -446,11 +458,13 @@ func (r *builder) buildFromIn(expr *expression.ScalarFunction) ([]point, bool) {
 		v, ok := e.(*expression.Constant)
 		if !ok {
 			r.err = ErrUnsupportedType.GenWithStack("expr:%v is not constant", e)
+			pc.Put(key, &pointsCacheEntry{points: fullRange, hasNull: hasNull})
 			return fullRange, hasNull
 		}
 		dt, err := v.Eval(chunk.Row{})
 		if err != nil {
 			r.err = ErrUnsupportedType.GenWithStack("expr:%v is not evaluated", e)
+			pc.Put(key, &pointsCacheEntry{points: fullRange, hasNull: hasNull})
 			return fullRange, hasNull
 		}
 		if dt.IsNull() {
@@ -464,6 +478,7 @@ func (r *builder) buildFromIn(expr *expression.ScalarFunction) ([]point, bool) {
 			dt, err = types.ConvertDatumToFloatYear(r.sc, dt)
 			if err != nil {
 				r.err = ErrUnsupportedType.GenWithStack("expr:%v is not converted to year", e)
+				pc.Put(key, &pointsCacheEntry{points: fullRange, hasNull: hasNull})
 				return fullRange, hasNull
 			}
 		}
@@ -493,6 +508,7 @@ func (r *builder) buildFromIn(expr *expression.ScalarFunction) ([]point, bool) {
 	if curPos > 0 {
 		curPos++
 	}
+	pc.Put(key, &pointsCacheEntry{points: rangePoints[:curPos], hasNull: hasNull})
 	return rangePoints[:curPos], hasNull
 }
 

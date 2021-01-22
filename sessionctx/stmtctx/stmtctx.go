@@ -160,6 +160,9 @@ type StatementContext struct {
 	TblInfo2UnionScan     map[*model.TableInfo]bool
 	TaskID                uint64 // unique ID for an execution of a statement
 	TaskMapBakTS          uint64 // counter for
+
+	// PointsCache
+	PointsCache *PointsCache
 }
 
 // StmtHints are SessionVars related sql hints.
@@ -199,6 +202,14 @@ func (sc *StatementContext) GetNowTsCached() time.Time {
 		sc.stmtTimeCached = true
 	}
 	return sc.nowTs
+}
+
+// GetPoingsCache getter for PointsCache, if nil create a new one
+func (sc *StatementContext) GetPointsCache() *PointsCache {
+	if sc.PointsCache == nil {
+		sc.PointsCache = NewPointsCache()
+	}
+	return sc.PointsCache
 }
 
 // ResetNowTs resetter for nowTs, clear cached time flag
@@ -756,4 +767,23 @@ func (d *CopTasksDetails) ToZapFields() (fields []zap.Field) {
 	fields = append(fields, zap.String("wait_max_time", strconv.FormatFloat(d.MaxWaitTime.Seconds(), 'f', -1, 64)+"s"))
 	fields = append(fields, zap.String("wait_max_addr", d.MaxWaitAddress))
 	return fields
+}
+
+type PointsCache struct {
+	data sync.Map
+}
+
+func NewPointsCache() *PointsCache {
+	return &PointsCache{
+		data: sync.Map{},
+	}
+}
+
+func (c *PointsCache) Get(key string) (interface{}, bool) {
+	item, have := c.data.Load(key)
+	return item, have
+}
+
+func (c *PointsCache) Put(key string, entry interface{}) {
+	c.data.Store(key, entry)
 }
